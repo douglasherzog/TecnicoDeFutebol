@@ -16,12 +16,22 @@ export interface Player {
   morale: number; // 1-100
 }
 
+export type Formation = '4-3-3' | '4-4-2' | '4-2-3-1';
+export type TacticalApproach = 'defensive' | 'balanced' | 'attacking';
+
+export interface TeamTactics {
+  formation: Formation;
+  approach: TacticalApproach;
+}
+
 export interface Team {
   id: string;
   name: string;
   shortName: string;
   colors: { primary: string; secondary: string };
   squad: Player[];
+  lineup?: string[];
+  tactics?: TeamTactics;
   budget: number; // available cash in dollars
 }
 
@@ -50,6 +60,75 @@ export interface Round {
   matches: Match[];
 }
 
+export type MatchEventType =
+  | 'kickoff' | 'goal' | 'save' | 'miss' | 'foul' | 'card' | 'red_card'
+  | 'penalty_goal' | 'penalty_miss' | 'injury' | 'own_goal' | 'sub'
+  | 'halftime' | 'fulltime';
+
+export interface MatchEvent {
+  minute: number;
+  type: MatchEventType;
+  teamId: string | null;
+  description: string;
+  xg?: number; // expected goals of the attempt, attributed to the attacking team
+  playerId?: string; // player involved in the event
+}
+
+export type CommentatorStyle = 'technical' | 'passionate' | 'neutral';
+
+export interface PlayerRating {
+  playerId: string;
+  name: string;
+  position: Position;
+  rating: number; // 0-10
+  goals: number;
+  assists: number;
+  saves: number;
+  cards: number;
+}
+
+export interface PreMatchAnalysis {
+  homeStrength: number;
+  awayStrength: number;
+  homeWinProb: number;
+  drawProb: number;
+  awayWinProb: number;
+  expectedGoalsHome: number;
+  expectedGoalsAway: number;
+  recentForm: { teamId: string; results: ('W' | 'D' | 'L')[] }[];
+}
+
+export interface PostMatchReport {
+  match: Match;
+  homeStats: LiveTeamStats;
+  awayStats: LiveTeamStats;
+  homeRatings: PlayerRating[];
+  awayRatings: PlayerRating[];
+  manOfTheMatch: PlayerRating | null;
+  homeApproach: TacticalApproach;
+  awayApproach: TacticalApproach;
+  events: MatchEvent[];
+}
+
+export interface LiveTeamStats {
+  shots: number;
+  onTarget: number;
+  xg: number;
+  fouls: number;
+  cards: number;
+  possession: number;
+}
+
+export interface LiveMatch {
+  match: Match;
+  events: MatchEvent[];
+  homeApproach: TacticalApproach;
+  awayApproach: TacticalApproach;
+  substitutionsUsed?: number;
+  commentatorStyle?: CommentatorStyle;
+  postMatchReport?: PostMatchReport;
+}
+
 export interface Division {
   id: number; // 1, 2, or 3
   name: string;
@@ -57,6 +136,25 @@ export interface Division {
   standings: Standing[];
   rounds: Round[];
   currentRound: number;
+}
+
+export interface CupRound {
+  name: string;
+  matches: Match[];
+}
+
+export interface CupCompetition {
+  name: string;
+  rounds: CupRound[];
+  currentRound: number;
+  championId: string | null;
+}
+
+export interface SeasonObjective {
+  description: string;
+  targetPosition: number;
+  cupTargetRound: number;
+  status: 'in-progress' | 'achieved' | 'missed';
 }
 
 // ==================== FINANCES ====================
@@ -92,7 +190,7 @@ export interface TransferOffer {
 
 // ==================== GAME STATE ====================
 
-export type GamePhase = 'menu' | 'new-game' | 'playing' | 'end-season' | 'transfer-window';
+export type GamePhase = 'menu' | 'new-game' | 'playing' | 'pre-match' | 'live-match' | 'post-match' | 'end-season' | 'transfer-window';
 
 export interface SeasonResult {
   season: number;

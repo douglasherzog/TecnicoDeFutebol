@@ -1,4 +1,4 @@
-import type { TransferOffer } from '../types';
+import type { Team, TransferOffer } from '../types';
 import { generateFreeAgent } from './playerGenerator';
 
 let offerIdCounter = 0;
@@ -13,6 +13,7 @@ export function generateTransferOffers(
   playerDivisionId: number,
   currentRound: number,
   count: number = 3,
+  sourceTeams: Team[] = [],
 ): TransferOffer[] {
   const offers: TransferOffer[] = [];
 
@@ -22,7 +23,10 @@ export function generateTransferOffers(
       Math.max(1, playerDivisionId - 1),
       Math.min(3, playerDivisionId + 1),
     );
-    const player = generateFreeAgent(divForPlayer);
+    const sourceTeam = sourceTeams.length > 0 && Math.random() < 0.65
+      ? sourceTeams[randomInt(0, sourceTeams.length - 1)]
+      : undefined;
+    const player = sourceTeam?.squad[randomInt(0, sourceTeam.squad.length - 1)] ?? generateFreeAgent(divForPlayer);
 
     // Asking price varies: some are bargains, some are expensive
     const priceVariation = randomInt(80, 150) / 100;
@@ -39,7 +43,7 @@ export function generateTransferOffers(
     offers.push({
       id: `offer-${offerIdCounter}`,
       player,
-      fromTeamId: null, // free agents for now
+      fromTeamId: sourceTeam?.id ?? null,
       askingPrice,
       salary,
       deadline: currentRound + randomInt(2, 5),

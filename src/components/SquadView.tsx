@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { useGameStore } from '../store/gameStore';
-import type { Player, Position } from '../types';
+import type { Formation, Player, Position, TacticalApproach } from '../types';
+import { createLineup } from '../engine/squadEngine';
 
 const positionColors: Record<Position, string> = {
   GOL: 'bg-yellow-500/20 text-yellow-400',
@@ -20,30 +22,72 @@ function OverallBadge({ overall }: { overall: number }) {
   return <span className={`font-bold text-lg ${color}`}>{overall}</span>;
 }
 
-function PlayerRow({ player }: { player: Player }) {
+function PlayerRow({ player, selected, onToggle }: { player: Player; selected: boolean; onToggle: () => void }) {
+  const { sellPlayer, renewContract } = useGameStore();
+  const [salary, setSalary] = useState(player.salary);
+  const [years, setYears] = useState(Math.max(1, player.contractYears));
+  const [showContract, setShowContract] = useState(false);
+
+  const handleSale = () => {
+    if (window.confirm(`Vender ${player.name} por aproximadamente $${Math.round(player.marketValue * 0.9).toLocaleString()}?`)) sellPlayer(player.id);
+  };
+
+  const handleRenewal = () => {
+    if (renewContract(player.id, salary, years).success) setShowContract(false);
+  };
+
   return (
-    <tr className="border-b border-gray-700/50 hover:bg-gray-800/50">
-      <td className="px-3 py-2">
-        <span className={`px-2 py-0.5 rounded text-xs font-bold ${positionColors[player.position]}`}>
-          {player.position}
-        </span>
-      </td>
+    <tr className={`border-b border-gray-700/50 hover:bg-gray-800/50 ${selected ? 'bg-green-900/20' : ''}`}>
+      <td className="px-3 py-2"><input type="checkbox" checked={selected} onChange={onToggle} className="accent-green-500 cursor-pointer" /></td>
+      <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-bold ${positionColors[player.position]}`}>{player.position}</span></td>
       <td className="px-3 py-2 text-white font-medium">{player.name}</td>
       <td className="px-3 py-2 text-center"><OverallBadge overall={player.overall} /></td>
       <td className="px-3 py-2 text-center text-gray-400">{player.potential}</td>
       <td className="px-3 py-2 text-center text-gray-400">{player.age}</td>
+      <td className="px-3 py-2 text-center text-gray-400">{player.stamina}</td>
+      <td className="px-3 py-2 text-center text-gray-400">{player.morale}</td>
       <td className="px-3 py-2 text-right text-gray-300">${player.salary.toLocaleString()}</td>
       <td className="px-3 py-2 text-right text-gray-300">${player.marketValue.toLocaleString()}</td>
       <td className="px-3 py-2 text-center text-gray-400">{player.contractYears}a</td>
+      <td className="px-3 py-2 text-right">
+        {showContract ? (
+          <div className="flex items-center gap-1">
+            <input aria-label={`Salário de ${player.name}`} type="number" value={salary} min={1} onChange={event => setSalary(Number(event.target.value))} className="w-20 bg-gray-900 border border-gray-600 rounded px-1 py-1 text-xs text-white" />
+            <input aria-label={`Anos de contrato de ${player.name}`} type="number" value={years} min={1} max={5} onChange={event => setYears(Number(event.target.value))} className="w-10 bg-gray-900 border border-gray-600 rounded px-1 py-1 text-xs text-white" />
+            <button onClick={handleRenewal} className="text-green-400 text-xs cursor-pointer">OK</button>
+          </div>
+        ) : (
+          <div className="flex justify-end gap-2 text-xs">
+            <button onClick={() => setShowContract(true)} className="text-blue-400 hover:text-blue-300 cursor-pointer">Renovar</button>
+            <button onClick={handleSale} className="text-red-400 hover:text-red-300 cursor-pointer">Vender</button>
+          </div>
+        )}
+      </td>
     </tr>
   );
 }
 
 export function SquadView() {
-  const { getPlayerTeam } = useGameStore();
+  const { getPlayerTeam, setLineup, setTactics } = useGameStore();
   const team = getPlayerTeam();
+  const [formation, setFormation] = useState<Formation>(team?.tactics?.formation ?? '4-3-3');
+  const [approach, setApproach] = useState<TacticalApproach>(team?.tactics?.approach ?? 'balanced');
+  const [selectedIds, setSelectedIds] = useState<string[]>(team?.lineup ?? (team ? createLineup(team.squad, formation) : []));
 
   if (!team) return null;
+
+  const togglePlayer = (playerId: string) => {
+    setSelectedIds(current => current.includes(playerId)
+      ? current.filter(id => id !== playerId)
+      : current.length < 11 ? [...current, playerId] : current);
+  };
+
+  const applyTactics = () => {
+    setTactics(formation, approach);
+    setSelectedIds(createLineup(team.squad, formation));
+  };
+
+  const saveLineup = () => setLineup(selectedIds);
 
   const sortedSquad = [...team.squad].sort((a, b) => {
     const posOrder: Position[] = ['GOL', 'ZAG', 'LAT', 'VOL', 'MEI', 'ATA'];
@@ -87,25 +131,46 @@ export function SquadView() {
         </div>
       </div>
 
-      {/* Squad Table */}
+      <div className="bg-gray-800 rounded-lg p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <select value={formation} onChange={event => setFormation(event.target.value as Formation)} className="bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white">
+          <option value="4-3-3">4-3-3</option>
+          <option value="4-4-2">4-4-2</option>
+          <option value="4-2-3-1">4-2-3-1</option>
+        </select>
+        <select value={approach} onChange={event => setApproach(event.target.value as TacticalApproach)} className="bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white">
+          <option value="defensive">Defensiva</option>
+          <option value="balanced">Equilibrada</option>
+          <option value="attacking">Ofensiva</option>
+        </select>
+        <button onClick={applyTactics} className="bg-blue-600 hover:bg-blue-500 rounded px-3 py-2 text-white font-medium cursor-pointer">Aplicar tática</button>
+        <div className="md:col-span-3 flex items-center justify-between text-sm">
+          <span className={selectedIds.length === 11 ? 'text-green-400' : 'text-yellow-400'}>{selectedIds.length}/11 titulares selecionados</span>
+          <button onClick={saveLineup} disabled={selectedIds.length !== 11} className="bg-green-600 hover:bg-green-500 disabled:bg-gray-600 rounded px-3 py-2 text-white font-medium cursor-pointer">Salvar escalação</button>
+        </div>
+      </div>
+
       <div className="bg-gray-800 rounded-lg overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-gray-400 border-b border-gray-700 bg-gray-700/30">
+                <th className="px-3 py-2 text-left">Tit.</th>
                 <th className="px-3 py-2 text-left">Pos</th>
                 <th className="px-3 py-2 text-left">Nome</th>
                 <th className="px-3 py-2 text-center">OVR</th>
                 <th className="px-3 py-2 text-center">POT</th>
                 <th className="px-3 py-2 text-center">Idade</th>
+                <th className="px-3 py-2 text-center">Fís.</th>
+                <th className="px-3 py-2 text-center">Moral</th>
                 <th className="px-3 py-2 text-right">Salário</th>
                 <th className="px-3 py-2 text-right">Valor</th>
                 <th className="px-3 py-2 text-center">Contr.</th>
+                <th className="px-3 py-2 text-right">Ações</th>
               </tr>
             </thead>
             <tbody>
               {sortedSquad.map(player => (
-                <PlayerRow key={player.id} player={player} />
+                <PlayerRow key={player.id} player={player} selected={selectedIds.includes(player.id)} onToggle={() => togglePlayer(player.id)} />
               ))}
             </tbody>
           </table>

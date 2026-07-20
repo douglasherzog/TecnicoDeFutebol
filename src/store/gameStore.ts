@@ -1,12 +1,16 @@
 import { create } from 'zustand';
-import type { Division, Finances, FinanceEntry, GamePhase, Match, SeasonResult, Standing, Team, TransferOffer } from '../types';
+import { persist } from 'zustand/middleware';
+import type { CupCompetition, Division, Finances, FinanceEntry, Formation, GamePhase, LiveMatch, Match, PostMatchReport, PreMatchAnalysis, SeasonObjective, SeasonResult, Standing, TacticalApproach, Team, TransferOffer } from '../types';
 import { division1Teams, division2Teams, division3Teams } from '../data/teams';
 import type { TeamBase } from '../data/teams';
 import { generateFixtures } from '../engine/fixtureGenerator';
 import { simulateMatch } from '../engine/matchEngine';
 import { generateSquad, resetPlayerIdCounter } from '../engine/playerGenerator';
+import { createLineup, progressSquad, updateTeamCondition } from '../engine/squadEngine';
 import { getStartingBudget, processMatchFinances, processMonthlyFinances, processEndSeasonPrize } from '../engine/financeEngine';
 import { generateTransferOffers, attemptSigning, resetOfferIdCounter } from '../engine/transferMarket';
+import { generateCup, simulateCupRound } from '../engine/cupEngine';
+import { computePostMatchReport, computePreMatchAnalysis, createLiveMatch, regenerateFromMinute } from '../engine/liveMatchEngine';
 
 interface GameState {
   phase: GamePhase;
@@ -18,9 +22,24 @@ interface GameState {
   seasonHistory: SeasonResult[];
   finances: Finances;
   transferOffers: TransferOffer[];
+  cup: CupCompetition | null;
+  objective: SeasonObjective | null;
+  liveMatch: LiveMatch | null;
+  preMatchAnalysis: PreMatchAnalysis | null;
+  postMatchReport: PostMatchReport | null;
   notifications: string[];
 
   // Actions
+  openNewGame: () => void;
+  showEndSeason: () => void;
+  startLiveMatch: () => void;
+  startPreMatch: () => void;
+  beginLiveMatch: () => void;
+  setLiveMatchApproach: (approach: TacticalApproach, fromMinute?: number) => void;
+  makeLiveSubstitution: (outPlayerId: string, inPlayerId: string, minute: number) => { success: boolean; reason: string };
+  finishLiveMatch: () => void;
+  showPostMatch: () => void;
+  closePostMatch: () => void;
   startNewGame: (coachName: string) => void;
   simulateRound: () => void;
   simulateAllRounds: () => void;
@@ -28,18 +47,26 @@ interface GameState {
   getPlayerDivision: () => Division | undefined;
   getPlayerTeam: () => Team | undefined;
   getTeamById: (id: string) => Team | undefined;
+  setLineup: (playerIds: string[]) => void;
+  setTactics: (formation: Formation, approach: TacticalApproach) => void;
   makeOffer: (offerId: string, price: number, salary: number) => { success: boolean; reason: string };
+  sellPlayer: (playerId: string) => { success: boolean; reason: string };
+  renewContract: (playerId: string, salary: number, years: number) => { success: boolean; reason: string };
   dismissOffer: (offerId: string) => void;
   resetGame: () => void;
 }
 
 function buildTeam(base: TeamBase, divisionId: number): Team {
+  const squad = generateSquad(divisionId);
+  const tactics = { formation: '4-3-3' as const, approach: 'balanced' as const };
   return {
     id: base.id,
     name: base.name,
     shortName: base.shortName,
     colors: base.colors,
-    squad: generateSquad(divisionId),
+    squad,
+    lineup: createLineup(squad, tactics.formation),
+    tactics,
     budget: getStartingBudget(divisionId),
   };
 }
@@ -148,7 +175,7 @@ const INITIAL_FINANCES: Finances = {
   history: [],
 };
 
-export const useGameStore = create<GameState>((set, get) => ({
+export const useGameStore = create<GameState>()(persist((set, get) => ({
   phase: 'menu',
   coachName: '',
   playerTeamId: null,
@@ -158,7 +185,160 @@ export const useGameStore = create<GameState>((set, get) => ({
   seasonHistory: [],
   finances: INITIAL_FINANCES,
   transferOffers: [],
+  cup: null,
+  objective: null,
+  liveMatch: null,
+  preMatchAnalysis: null,
+  postMatchReport: null,
   notifications: [],
+
+  openNewGame: () => set({ phase: 'new-game' }),
+
+  showEndSeason: () => set({ phase: 'end-season' }),
+
+  startLiveMatch: () => {
+    const { divisions, playerTeamId } = get();
+    const playerDiv = divisions.find(division => division.teams.some(team => team.id === playerTeamId));
+    if (!playerDiv || playerDiv.currentRound >= playerDiv.rounds.length) return;
+
+    const round = playerDiv.rounds[playerDiv.currentRound];
+    const playerMatch = round.matches.find(match => match.homeTeamId === playerTeamId || match.awayTeamId === playerTeamId);
+    if (!playerMatch) return;
+
+    const homeTeam = playerDiv.teams.find(team => team.id === playerMatch.homeTeamId)!;
+    const awayTeam = playerDiv.teams.find(team => team.id === playerMatch.awayTeamId)!;
+    set({ liveMatch: createLiveMatch(homeTeam, awayTeam, playerMatch.id), phase: 'live-match' });
+  },
+
+  startPreMatch: () => {
+    const { divisions, playerTeamId } = get();
+    const playerDiv = divisions.find(division => division.teams.some(team => team.id === playerTeamId));
+    if (!playerDiv || playerDiv.currentRound >= playerDiv.rounds.length) return;
+
+    const round = playerDiv.rounds[playerDiv.currentRound];
+    const playerMatch = round.matches.find(match => match.homeTeamId === playerTeamId || match.awayTeamId === playerTeamId);
+    if (!playerMatch) return;
+
+    const homeTeam = playerDiv.teams.find(team => team.id === playerMatch.homeTeamId)!;
+    const awayTeam = playerDiv.teams.find(team => team.id === playerMatch.awayTeamId)!;
+    const homeApproach = homeTeam.tactics?.approach ?? 'balanced';
+    const awayApproach = awayTeam.tactics?.approach ?? 'balanced';
+
+    const recentResults = playerDiv.rounds.slice(Math.max(0, playerDiv.currentRound - 5), playerDiv.currentRound).map(round => {
+      const match = round.matches.find(m => m.homeTeamId === playerTeamId || m.awayTeamId === playerTeamId);
+      if (!match || !match.played) return null;
+      const isHome = match.homeTeamId === playerTeamId;
+      const goalsFor = isHome ? match.homeGoals! : match.awayGoals!;
+      const goalsAgainst = isHome ? match.awayGoals! : match.homeGoals!;
+      const result = goalsFor > goalsAgainst ? 'W' : goalsFor < goalsAgainst ? 'L' : 'D';
+      return { teamId: playerTeamId!, results: [result] };
+    }).filter(Boolean) as { teamId: string; results: ('W' | 'D' | 'L')[] }[];
+
+    const analysis = computePreMatchAnalysis(homeTeam, awayTeam, homeApproach, awayApproach, recentResults);
+    set({ preMatchAnalysis: analysis, phase: 'pre-match' });
+  },
+
+  beginLiveMatch: () => {
+    const { divisions, playerTeamId } = get();
+    const playerDiv = divisions.find(division => division.teams.some(team => team.id === playerTeamId));
+    if (!playerDiv || playerDiv.currentRound >= playerDiv.rounds.length) return;
+
+    const round = playerDiv.rounds[playerDiv.currentRound];
+    const playerMatch = round.matches.find(match => match.homeTeamId === playerTeamId || match.awayTeamId === playerTeamId);
+    if (!playerMatch) return;
+
+    const homeTeam = playerDiv.teams.find(team => team.id === playerMatch.homeTeamId)!;
+    const awayTeam = playerDiv.teams.find(team => team.id === playerMatch.awayTeamId)!;
+    set({ liveMatch: createLiveMatch(homeTeam, awayTeam, playerMatch.id), phase: 'live-match' });
+  },
+
+  setLiveMatchApproach: (approach: TacticalApproach, fromMinute: number = 46) => {
+    const { liveMatch, divisions, playerTeamId } = get();
+    if (!liveMatch) return;
+
+    const teams = divisions.flatMap(division => division.teams);
+    const homeTeam = teams.find(team => team.id === liveMatch.match.homeTeamId)!;
+    const awayTeam = teams.find(team => team.id === liveMatch.match.awayTeamId)!;
+    const isHome = playerTeamId === homeTeam.id;
+    const homeApproach = isHome ? approach : liveMatch.homeApproach;
+    const awayApproach = isHome ? liveMatch.awayApproach : approach;
+
+    set({
+      liveMatch: regenerateFromMinute(liveMatch, homeTeam, awayTeam, homeApproach, awayApproach, fromMinute),
+      divisions: divisions.map(division => ({
+        ...division,
+        teams: division.teams.map(team => team.id === playerTeamId && team.tactics
+          ? { ...team, tactics: { ...team.tactics, approach } }
+          : team),
+      })),
+    });
+  },
+
+  makeLiveSubstitution: (outPlayerId: string, inPlayerId: string, minute: number) => {
+    const { liveMatch, divisions, playerTeamId } = get();
+    if (!liveMatch || !playerTeamId) return { success: false, reason: 'Nenhuma partida em andamento.' };
+
+    const substitutionsUsed = liveMatch.substitutionsUsed ?? 0;
+    if (substitutionsUsed >= 3) return { success: false, reason: 'Limite de 3 substituições atingido.' };
+
+    const playerTeam = divisions.flatMap(division => division.teams).find(team => team.id === playerTeamId);
+    if (!playerTeam?.lineup?.includes(outPlayerId)) return { success: false, reason: 'O jogador que sai não está em campo.' };
+    if (playerTeam.lineup.includes(inPlayerId)) return { success: false, reason: 'O jogador que entra já está em campo.' };
+
+    const playerOut = playerTeam.squad.find(player => player.id === outPlayerId);
+    const playerIn = playerTeam.squad.find(player => player.id === inPlayerId);
+    if (!playerOut || !playerIn) return { success: false, reason: 'Jogador não encontrado no elenco.' };
+
+    const updatedDivisions = divisions.map(division => ({
+      ...division,
+      teams: division.teams.map(team => team.id === playerTeamId
+        ? { ...team, lineup: team.lineup!.map(id => id === outPlayerId ? inPlayerId : id) }
+        : team),
+    }));
+
+    const teams = updatedDivisions.flatMap(division => division.teams);
+    const homeTeam = teams.find(team => team.id === liveMatch.match.homeTeamId)!;
+    const awayTeam = teams.find(team => team.id === liveMatch.match.awayTeamId)!;
+    const subEvent = {
+      minute,
+      type: 'sub' as const,
+      teamId: playerTeamId,
+      description: `Substituição no ${playerTeam.name}: sai ${playerOut.name}, entra ${playerIn.name}.`,
+    };
+    const updatedLiveMatch = regenerateFromMinute(liveMatch, homeTeam, awayTeam, liveMatch.homeApproach, liveMatch.awayApproach, minute + 1, [subEvent]);
+
+    set({
+      divisions: updatedDivisions,
+      liveMatch: { ...updatedLiveMatch, substitutionsUsed: substitutionsUsed + 1 },
+    });
+    return { success: true, reason: `${playerIn.name} entrou no lugar de ${playerOut.name}.` };
+  },
+
+  finishLiveMatch: () => {
+    const { liveMatch, divisions } = get();
+    if (!liveMatch) return;
+    const teams = divisions.flatMap(division => division.teams);
+    const homeTeam = teams.find(team => team.id === liveMatch.match.homeTeamId)!;
+    const awayTeam = teams.find(team => team.id === liveMatch.match.awayTeamId)!;
+    const report = computePostMatchReport(liveMatch, homeTeam, awayTeam);
+    set({ postMatchReport: report, phase: 'post-match' });
+  },
+
+  showPostMatch: () => {
+    const { liveMatch, divisions } = get();
+    if (!liveMatch) return;
+    const teams = divisions.flatMap(division => division.teams);
+    const homeTeam = teams.find(team => team.id === liveMatch.match.homeTeamId)!;
+    const awayTeam = teams.find(team => team.id === liveMatch.match.awayTeamId)!;
+    const report = computePostMatchReport(liveMatch, homeTeam, awayTeam);
+    set({ postMatchReport: report, phase: 'post-match' });
+  },
+
+  closePostMatch: () => {
+    if (!get().liveMatch) return;
+    get().simulateRound();
+    set({ liveMatch: null, postMatchReport: null, preMatchAnalysis: null, phase: 'playing' });
+  },
 
   startNewGame: (coachName: string) => {
     resetPlayerIdCounter();
@@ -184,7 +364,14 @@ export const useGameStore = create<GameState>((set, get) => ({
     };
 
     // Generate initial transfer offers
-    const offers = generateTransferOffers(3, 0, 3);
+    const offers = generateTransferOffers(3, 0, 3, [...d1Teams, ...d2Teams, ...d3Teams.filter(team => team.id !== playerTeam.id)]);
+    const cup = generateCup([...d1Teams, ...d2Teams, ...d3Teams], playerTeam.id);
+    const objective: SeasonObjective = {
+      description: 'Terminar entre os 4 primeiros e chegar às quartas da Copa Nacional.',
+      targetPosition: 4,
+      cupTargetRound: 1,
+      status: 'in-progress',
+    };
 
     set({
       phase: 'playing',
@@ -196,12 +383,14 @@ export const useGameStore = create<GameState>((set, get) => ({
       seasonHistory: [],
       finances,
       transferOffers: offers,
+      cup,
+      objective,
       notifications: [`Bem-vindo, técnico ${coachName}! Você assumiu o comando do ${playerTeam.name} na Terceira Divisão.`],
     });
   },
 
   simulateRound: () => {
-    const { divisions, playerTeamId, finances, transferOffers } = get();
+    const { divisions, playerTeamId, finances, transferOffers, cup, objective } = get();
     const allResults: Match[] = [];
     const newFinanceEntries: FinanceEntry[] = [];
     const newNotifications: string[] = [];
@@ -215,7 +404,10 @@ export const useGameStore = create<GameState>((set, get) => ({
       const simulatedMatches = round.matches.map(match => {
         const homeTeam = division.teams.find(t => t.id === match.homeTeamId)!;
         const awayTeam = division.teams.find(t => t.id === match.awayTeamId)!;
-        const result = simulateMatch(homeTeam, awayTeam, match.id);
+        const liveMatch = get().liveMatch;
+        const result = liveMatch && liveMatch.match.id === match.id
+          ? liveMatch.match
+          : simulateMatch(homeTeam, awayTeam, match.id);
         allResults.push(result);
         newStandings = updateStandings(newStandings, result);
         return result;
@@ -225,8 +417,19 @@ export const useGameStore = create<GameState>((set, get) => ({
         i === division.currentRound ? { ...r, matches: simulatedMatches } : r
       );
 
+      const updatedTeams = division.teams.map(team => {
+        const teamMatch = simulatedMatches.find(match => match.homeTeamId === team.id || match.awayTeamId === team.id);
+        if (!teamMatch) return team;
+        const isHome = teamMatch.homeTeamId === team.id;
+        const goalsFor = isHome ? teamMatch.homeGoals! : teamMatch.awayGoals!;
+        const goalsAgainst = isHome ? teamMatch.awayGoals! : teamMatch.homeGoals!;
+        const result = goalsFor > goalsAgainst ? 'win' : goalsFor < goalsAgainst ? 'loss' : 'draw';
+        return updateTeamCondition(team, result);
+      });
+
       return {
         ...division,
+        teams: updatedTeams,
         rounds: updatedRounds,
         standings: sortStandings(newStandings),
         currentRound: division.currentRound + 1,
@@ -273,7 +476,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     // Generate new transfer offers every 5 rounds
     let updatedOffers = transferOffers.filter(o => o.status === 'pending' && o.deadline > (playerDiv?.currentRound ?? 0));
     if (playerDiv && playerDiv.currentRound % 5 === 0) {
-      const newOffers = generateTransferOffers(playerDiv.id, playerDiv.currentRound, 2);
+      const sourceTeams = updatedDivisions.flatMap(division => division.teams).filter(team => team.id !== playerTeamId);
+      const newOffers = generateTransferOffers(playerDiv.id, playerDiv.currentRound, 2, sourceTeams);
       updatedOffers = [...updatedOffers, ...newOffers];
       newNotifications.push('Novas opções disponíveis no mercado de transferências!');
     }
@@ -286,6 +490,19 @@ export const useGameStore = create<GameState>((set, get) => ({
       });
     }
 
+    const playerRound = playerDiv?.currentRound ?? 0;
+    const updatedCup = cup && playerRound > 0 && playerRound % 8 === 0 && !cup.championId
+      ? simulateCupRound(cup, updatedDivisions.flatMap(division => division.teams))
+      : cup;
+    const reachedCupTarget = updatedCup?.rounds[objective?.cupTargetRound ?? -1]?.matches.some(match =>
+      match.homeTeamId === playerTeamId || match.awayTeamId === playerTeamId,
+    ) ?? false;
+    const updatedObjective = objective ? {
+      ...objective,
+      status: playerDiv && playerDiv.standings.findIndex(standing => standing.teamId === playerTeamId) + 1 <= objective.targetPosition && reachedCupTarget
+        ? 'achieved' as const
+        : objective.status,
+    } : null;
     const seasonEnded = updatedDivisions.every(d => d.currentRound >= d.rounds.length);
 
     set({
@@ -298,6 +515,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         history: [...finances.history, ...newFinanceEntries],
       },
       transferOffers: updatedOffers,
+      cup: updatedCup,
+      objective: updatedObjective,
       notifications: newNotifications,
     });
   },
@@ -362,11 +581,23 @@ export const useGameStore = create<GameState>((set, get) => ({
       ...div2Relegated,
     ];
 
-    const newDivisions = createDivisions(newDiv1Teams, newDiv2Teams, newDiv3Teams);
+    const newDivisions = createDivisions(
+      newDiv1Teams.map(progressSquad),
+      newDiv2Teams.map(progressSquad),
+      newDiv3Teams.map(progressSquad),
+    );
 
     // Generate fresh transfer offers for new season
     const newPlayerDiv = newDivisions.find(d => d.teams.some(t => t.id === playerTeamId));
-    const newOffers = generateTransferOffers(newPlayerDiv?.id ?? 3, 0, 4);
+    const sourceTeams = newDivisions.flatMap(division => division.teams).filter(team => team.id !== playerTeamId);
+    const newOffers = generateTransferOffers(newPlayerDiv?.id ?? 3, 0, 4, sourceTeams);
+    const newCup = generateCup(newDivisions.flatMap(division => division.teams), playerTeamId!);
+    const newObjective: SeasonObjective = {
+      description: 'Terminar entre os 4 primeiros e chegar às quartas da Copa Nacional.',
+      targetPosition: 4,
+      cupTargetRound: 1,
+      status: 'in-progress',
+    };
 
     set({
       season: season + 1,
@@ -381,6 +612,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         history: [...finances.history, prizeEntry],
       },
       transferOffers: newOffers,
+      cup: newCup,
+      objective: newObjective,
       notifications: [
         `Temporada ${season + 1} iniciada!`,
         promoted ? 'Parabéns! Seu time foi promovido!' : relegated ? 'Infelizmente, seu time foi rebaixado.' : 'Seu time permanece na mesma divisão.',
@@ -411,6 +644,37 @@ export const useGameStore = create<GameState>((set, get) => ({
     return undefined;
   },
 
+  setLineup: (playerIds: string[]) => {
+    const { divisions, playerTeamId } = get();
+    const uniquePlayerIds = [...new Set(playerIds)];
+    if (uniquePlayerIds.length !== 11) return;
+
+    set({
+      divisions: divisions.map(division => ({
+        ...division,
+        teams: division.teams.map(team => {
+          if (team.id !== playerTeamId) return team;
+          const validIds = new Set(team.squad.map(player => player.id));
+          return uniquePlayerIds.every(id => validIds.has(id)) ? { ...team, lineup: uniquePlayerIds } : team;
+        }),
+      })),
+    });
+  },
+
+  setTactics: (formation: Formation, approach: TacticalApproach) => {
+    const { divisions, playerTeamId } = get();
+    set({
+      divisions: divisions.map(division => ({
+        ...division,
+        teams: division.teams.map(team =>
+          team.id === playerTeamId
+            ? { ...team, tactics: { formation, approach }, lineup: createLineup(team.squad, formation) }
+            : team
+        ),
+      })),
+    });
+  },
+
   makeOffer: (offerId: string, price: number, salary: number) => {
     const { transferOffers, finances, playerTeamId, divisions } = get();
     const offer = transferOffers.find(o => o.id === offerId);
@@ -427,11 +691,18 @@ export const useGameStore = create<GameState>((set, get) => ({
       const player = { ...offer.player, salary, contractYears: 3, morale: 75 };
       const updatedDivisions = divisions.map(div => ({
         ...div,
-        teams: div.teams.map(team =>
-          team.id === playerTeamId
-            ? { ...team, squad: [...team.squad, player] }
-            : team
-        ),
+        teams: div.teams.map(team => {
+          if (team.id === playerTeamId) return { ...team, squad: [...team.squad, player] };
+          if (team.id === offer.fromTeamId) {
+            return {
+              ...team,
+              budget: team.budget + price,
+              squad: team.squad.filter(candidate => candidate.id !== offer.player.id),
+              lineup: team.lineup?.filter(id => id !== offer.player.id),
+            };
+          }
+          return team;
+        }),
       }));
 
       // Update finances
@@ -463,6 +734,61 @@ export const useGameStore = create<GameState>((set, get) => ({
     return result;
   },
 
+  sellPlayer: (playerId: string) => {
+    const { divisions, playerTeamId, finances } = get();
+    const playerTeam = divisions.flatMap(division => division.teams).find(team => team.id === playerTeamId);
+    const player = playerTeam?.squad.find(candidate => candidate.id === playerId);
+    if (!player || !playerTeam) return { success: false, reason: 'Jogador não encontrado.' };
+    if (playerTeam.squad.length <= 11) return { success: false, reason: 'Mantenha ao menos 11 jogadores no elenco.' };
+
+    const salePrice = Math.round(player.marketValue * 0.9 / 1000) * 1000;
+    const entry: FinanceEntry = {
+      round: 0,
+      type: 'transfer_in',
+      amount: salePrice,
+      description: `Venda: ${player.name} (${player.position})`,
+    };
+
+    set({
+      divisions: divisions.map(division => ({
+        ...division,
+        teams: division.teams.map(team => team.id === playerTeamId
+          ? { ...team, squad: team.squad.filter(candidate => candidate.id !== playerId), lineup: team.lineup?.filter(id => id !== playerId) }
+          : team),
+      })),
+      finances: {
+        ...finances,
+        balance: finances.balance + salePrice,
+        monthlySalaries: finances.monthlySalaries - player.salary,
+        history: [...finances.history, entry],
+      },
+      notifications: [`${player.name} foi vendido por $${salePrice.toLocaleString()}.`],
+    });
+    return { success: true, reason: 'Venda concluída.' };
+  },
+
+  renewContract: (playerId: string, salary: number, years: number) => {
+    const { divisions, playerTeamId, finances } = get();
+    if (!Number.isFinite(salary) || salary <= 0 || !Number.isInteger(years) || years < 1 || years > 5) {
+      return { success: false, reason: 'Informe salário válido e contrato entre 1 e 5 anos.' };
+    }
+    const playerTeam = divisions.flatMap(division => division.teams).find(team => team.id === playerTeamId);
+    const player = playerTeam?.squad.find(candidate => candidate.id === playerId);
+    if (!player) return { success: false, reason: 'Jogador não encontrado.' };
+
+    set({
+      divisions: divisions.map(division => ({
+        ...division,
+        teams: division.teams.map(team => team.id === playerTeamId
+          ? { ...team, squad: team.squad.map(candidate => candidate.id === playerId ? { ...candidate, salary, contractYears: years, morale: Math.min(100, candidate.morale + 5) } : candidate) }
+          : team),
+      })),
+      finances: { ...finances, monthlySalaries: finances.monthlySalaries - player.salary + salary },
+      notifications: [`Contrato de ${player.name} renovado por ${years} ano(s).`],
+    });
+    return { success: true, reason: 'Contrato renovado.' };
+  },
+
   dismissOffer: (offerId: string) => {
     const { transferOffers } = get();
     set({
@@ -481,7 +807,32 @@ export const useGameStore = create<GameState>((set, get) => ({
       seasonHistory: [],
       finances: INITIAL_FINANCES,
       transferOffers: [],
-      notifications: [],
+      cup: null,
+      objective: null,
+      liveMatch: null,
+      preMatchAnalysis: null,
+      postMatchReport: null,
+      notifications: []
     });
   },
+}), {
+  name: 'tecnico-de-futebol-career',
+  version: 1,
+  partialize: (state) => ({
+    phase: state.phase,
+    coachName: state.coachName,
+    playerTeamId: state.playerTeamId,
+    season: state.season,
+    divisions: state.divisions,
+    lastRoundResults: state.lastRoundResults,
+    seasonHistory: state.seasonHistory,
+    finances: state.finances,
+    transferOffers: state.transferOffers,
+    cup: state.cup,
+    objective: state.objective,
+    liveMatch: state.liveMatch,
+    preMatchAnalysis: state.preMatchAnalysis,
+    postMatchReport: state.postMatchReport,
+    notifications: state.notifications,
+  }),
 }));

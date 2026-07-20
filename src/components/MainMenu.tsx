@@ -2,7 +2,7 @@ import { Trophy } from 'lucide-react';
 import { useGameStore } from '../store/gameStore';
 
 export function MainMenu() {
-  const { phase } = useGameStore();
+  const { phase, openNewGame } = useGameStore();
 
   if (phase !== 'menu') return null;
 
@@ -24,7 +24,7 @@ export function MainMenu() {
           <p>Gerencie elenco, finanças e transferências</p>
         </div>
         <button
-          onClick={() => useGameStore.setState({ phase: 'new-game' })}
+          onClick={openNewGame}
           className="px-8 py-4 bg-yellow-500 hover:bg-yellow-400 text-green-900 font-bold text-xl rounded-lg shadow-lg transition-all hover:scale-105 cursor-pointer"
         >
           Novo Jogo

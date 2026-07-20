@@ -4,13 +4,14 @@ import { useGameStore } from '../store/gameStore';
 import type { TransferOffer } from '../types';
 
 function OfferCard({ offer }: { offer: TransferOffer }) {
-  const { makeOffer, dismissOffer, finances } = useGameStore();
+  const { makeOffer, dismissOffer, finances, getTeamById } = useGameStore();
   const [offeredPrice, setOfferedPrice] = useState(offer.askingPrice);
   const [offeredSalary, setOfferedSalary] = useState(offer.salary);
   const [result, setResult] = useState<string | null>(null);
   const [showNegotiation, setShowNegotiation] = useState(false);
 
   const canAfford = finances.balance >= offeredPrice;
+  const sourceTeam = offer.fromTeamId ? getTeamById(offer.fromTeamId) : undefined;
 
   const handleMakeOffer = () => {
     const res = makeOffer(offer.id, offeredPrice, offeredSalary);
@@ -32,9 +33,11 @@ function OfferCard({ offer }: { offer: TransferOffer }) {
             <span className="text-xs text-gray-400">POT: {offer.player.potential}</span>
             <span className="text-xs text-gray-400">{offer.player.age} anos</span>
           </div>
+          <p className="text-xs text-gray-500 mt-1">{sourceTeam ? `Clube atual: ${sourceTeam.name}` : 'Agente livre'}</p>
         </div>
         <button
           onClick={() => dismissOffer(offer.id)}
+          aria-label={`Dispensar oferta por ${offer.player.name}`}
           className="text-gray-500 hover:text-red-400 transition cursor-pointer"
         >
           <X className="w-4 h-4" />
@@ -78,8 +81,9 @@ function OfferCard({ offer }: { offer: TransferOffer }) {
         <div className="mt-3 space-y-3 border-t border-gray-700 pt-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs text-gray-400">Sua oferta (valor)</label>
+              <label htmlFor={`${offer.id}-price`} className="text-xs text-gray-400">Sua oferta (valor)</label>
               <input
+                id={`${offer.id}-price`}
                 type="number"
                 value={offeredPrice}
                 onChange={(e) => setOfferedPrice(Number(e.target.value))}
@@ -88,8 +92,9 @@ function OfferCard({ offer }: { offer: TransferOffer }) {
               />
             </div>
             <div>
-              <label className="text-xs text-gray-400">Salário oferecido</label>
+              <label htmlFor={`${offer.id}-salary`} className="text-xs text-gray-400">Salário oferecido</label>
               <input
+                id={`${offer.id}-salary`}
                 type="number"
                 value={offeredSalary}
                 onChange={(e) => setOfferedSalary(Number(e.target.value))}

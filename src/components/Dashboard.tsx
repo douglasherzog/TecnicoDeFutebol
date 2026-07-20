@@ -1,13 +1,15 @@
 import { useState, type ReactNode } from 'react';
-import { Play, FastForward, Trophy, TrendingUp, TrendingDown, Shield, DollarSign } from 'lucide-react';
+import { Play, FastForward, Trophy, TrendingUp, TrendingDown, Shield, DollarSign, Eye } from 'lucide-react';
 import { useGameStore } from '../store/gameStore';
 import { StandingsTable } from './StandingsTable';
 import { MatchResults } from './MatchResults';
 import { SquadView } from './SquadView';
 import { FinancesView } from './FinancesView';
 import { TransferMarket } from './TransferMarket';
+import { CalendarView } from './CalendarView';
+import { CupView } from './CupView';
 
-type Tab = 'overview' | 'standings' | 'squad' | 'finances' | 'transfers' | 'results';
+type Tab = 'overview' | 'standings' | 'squad' | 'finances' | 'transfers' | 'results' | 'calendar' | 'cup';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'overview', label: 'Visão Geral' },
@@ -15,11 +17,13 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'squad', label: 'Elenco' },
   { key: 'finances', label: 'Finanças' },
   { key: 'transfers', label: 'Mercado' },
+  { key: 'calendar', label: 'Calendário' },
+  { key: 'cup', label: 'Copa' },
   { key: 'results', label: 'Resultados' },
 ];
 
 export function Dashboard() {
-  const { phase, coachName, playerTeamId, season, divisions, finances, simulateRound, simulateAllRounds, notifications, transferOffers, seasonHistory } = useGameStore();
+  const { phase, coachName, playerTeamId, season, divisions, finances, simulateRound, simulateAllRounds, startPreMatch, showEndSeason, notifications, transferOffers, seasonHistory, objective } = useGameStore();
   const [activeTab, setActiveTab] = useState<Tab>('overview');
 
   if (phase !== 'playing') return null;
@@ -77,7 +81,7 @@ export function Dashboard() {
       {/* Notifications */}
       {notifications.length > 0 && (
         <div className="bg-gray-800/50 border-b border-gray-700 px-6 py-2">
-          <div className="max-w-7xl mx-auto flex gap-4 overflow-x-auto text-sm">
+          <div className="max-w-7xl mx-auto flex gap-4 overflow-x-auto text-sm" role="status" aria-live="polite">
             {notifications.map((n, i) => (
               <span key={i} className="text-yellow-300 whitespace-nowrap">{n}</span>
             ))}
@@ -87,11 +91,13 @@ export function Dashboard() {
 
       {/* Navigation Tabs */}
       <nav className="bg-gray-800/50 border-b border-gray-700">
-        <div className="max-w-7xl mx-auto flex gap-1 px-6 overflow-x-auto">
+        <div className="max-w-7xl mx-auto flex gap-1 px-6 overflow-x-auto" role="tablist" aria-label="Navegação principal">
           {TABS.map(({ key, label }) => (
             <button
               key={key}
               onClick={() => setActiveTab(key)}
+              role="tab"
+              aria-selected={activeTab === key}
               className={`px-4 py-3 text-sm font-medium transition cursor-pointer whitespace-nowrap ${
                 activeTab === key
                   ? 'text-yellow-400 border-b-2 border-yellow-400'
@@ -110,10 +116,17 @@ export function Dashboard() {
       </nav>
 
       {/* Content */}
-      <main className="max-w-7xl mx-auto p-6">
+      <main className="max-w-7xl mx-auto p-6" role="tabpanel" aria-label={TABS.find(tab => tab.key === activeTab)?.label}>
         {/* Action Buttons */}
         {!seasonFinished && (
-          <div className="flex gap-3 mb-6">
+          <div className="flex gap-3 mb-6 flex-wrap">
+            <button
+              onClick={startPreMatch}
+              className="flex items-center gap-2 px-5 py-3 bg-yellow-500 hover:bg-yellow-400 text-gray-900 font-medium rounded-lg transition cursor-pointer"
+            >
+              <Eye className="w-4 h-4" />
+              Assistir Partida
+            </button>
             <button
               onClick={simulateRound}
               className="flex items-center gap-2 px-5 py-3 bg-green-600 hover:bg-green-500 text-white font-medium rounded-lg transition cursor-pointer"
@@ -138,7 +151,7 @@ export function Dashboard() {
               Verifique a classificação final e avance para a próxima temporada.
             </p>
             <button
-              onClick={() => useGameStore.setState({ phase: 'end-season' })}
+              onClick={showEndSeason}
               className="mt-3 px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-gray-900 font-medium rounded-lg transition cursor-pointer"
             >
               Ver Resumo da Temporada
@@ -197,6 +210,16 @@ export function Dashboard() {
                 </div>
               </div>
 
+              {objective && (
+                <div className="mt-6 p-3 rounded-lg bg-gray-700/30 border border-gray-600">
+                  <h4 className="text-sm font-semibold text-gray-400 uppercase mb-1">Objetivo da Temporada</h4>
+                  <p className="text-sm text-white">{objective.description}</p>
+                  <p className={`text-xs mt-1 ${objective.status === 'achieved' ? 'text-green-400' : objective.status === 'missed' ? 'text-red-400' : 'text-yellow-400'}`}>
+                    {objective.status === 'achieved' ? 'Objetivo alcançado' : objective.status === 'missed' ? 'Objetivo não alcançado' : 'Em andamento'}
+                  </p>
+                </div>
+              )}
+
               {seasonHistory.length > 0 && (
                 <div className="mt-6">
                   <h4 className="text-sm font-semibold text-gray-400 uppercase mb-2">Histórico</h4>
@@ -223,6 +246,8 @@ export function Dashboard() {
         {activeTab === 'squad' && <SquadView />}
         {activeTab === 'finances' && <FinancesView />}
         {activeTab === 'transfers' && <TransferMarket />}
+        {activeTab === 'calendar' && <CalendarView />}
+        {activeTab === 'cup' && <CupView />}
         {activeTab === 'results' && <MatchResults />}
       </main>
     </div>

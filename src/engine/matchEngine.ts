@@ -1,5 +1,5 @@
 import type { Match, Team } from '../types';
-import { getTeamStrength } from './playerGenerator';
+import { getTacticalModifier, getTeamStrength, getTeamTactics } from './squadEngine';
 
 function randomGoals(strength: number, isHome: boolean): number {
   const base = strength / 100;
@@ -18,10 +18,12 @@ function randomGoals(strength: number, isHome: boolean): number {
 }
 
 export function simulateMatch(homeTeam: Team, awayTeam: Team, matchId: string): Match {
-  const homeStrength = getTeamStrength(homeTeam.squad);
-  const awayStrength = getTeamStrength(awayTeam.squad);
-  const homeGoals = randomGoals(homeStrength, true);
-  const awayGoals = randomGoals(awayStrength, false);
+  const homeTactics = getTacticalModifier(getTeamTactics(homeTeam).approach);
+  const awayTactics = getTacticalModifier(getTeamTactics(awayTeam).approach);
+  const homeStrength = getTeamStrength(homeTeam) + homeTactics.attack - awayTactics.defense;
+  const awayStrength = getTeamStrength(awayTeam) + awayTactics.attack - homeTactics.defense;
+  const homeGoals = randomGoals(Math.max(20, homeStrength), true);
+  const awayGoals = randomGoals(Math.max(20, awayStrength), false);
 
   return {
     id: matchId,

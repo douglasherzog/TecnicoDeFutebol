@@ -3,7 +3,7 @@ import { User, Shuffle } from 'lucide-react';
 import { useGameStore } from '../store/gameStore';
 
 export function NewGame() {
-  const { phase, startNewGame } = useGameStore();
+  const { phase, startNewGame, resetGame } = useGameStore();
   const [name, setName] = useState('');
 
   if (phase !== 'new-game') return null;
@@ -59,7 +59,7 @@ export function NewGame() {
         </button>
 
         <button
-          onClick={() => useGameStore.setState({ phase: 'menu' })}
+          onClick={resetGame}
           className="w-full text-center text-gray-400 hover:text-white transition text-sm cursor-pointer"
         >
           ← Voltar ao Menu
