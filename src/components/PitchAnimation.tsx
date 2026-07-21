@@ -173,7 +173,7 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
         if (ticked) setTick(n => n + 1);
       }
 
-      const alpha = accumulatorRef.current / TICK_INTERVAL_MS;
+      const alpha = simRef.current.getInterpolationAlpha();
       simRef.current.render(alpha, refsRef.current);
 
       const currentPlay = simRef.current.getCurrentPlay();

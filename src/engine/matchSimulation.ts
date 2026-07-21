@@ -249,6 +249,13 @@ export class MatchSimulation {
     }
   }
 
+  /** Returns interpolation alpha (0-1) between the last and next tactical tick. */
+  getInterpolationAlpha(): number {
+    if (this.done) return 1;
+    const elapsed = this.logicTime - this.lastTacticalTick;
+    return I.clamp(elapsed / this.tacticalTickInterval, 0, 1);
+  }
+
   /** Draw the interpolated frame by mutating the provided SVG refs directly. */
   render(alpha: number, refs: SimulationRefs, yScale = SIMULATION_CONFIG.Y_SCALE) {
     const visualBall = I.lerpCoord(this.ball.previous, this.ball.current, alpha);
