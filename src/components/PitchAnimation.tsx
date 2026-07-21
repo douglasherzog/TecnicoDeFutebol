@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import type { Team, MatchEvent, TacticalApproach } from '../types';
-import { buildPlayers, generateMinutePlays } from '../engine/pitchEngine';
+import { buildPlayers } from '../engine/pitchEngine';
 import { MatchSimulation, type SimulationRefs, TICK_INTERVAL_MS } from '../engine/matchSimulation';
 
 interface PitchAnimationProps {
@@ -21,6 +21,7 @@ const ACTION_COLORS: Record<string, string> = {
   cross: '#8b5cf6',
   carry: '#fbbf24',
   dribble: '#f59e0b',
+  tabela: '#f97316',
   header: '#a78bfa',
   tackle: '#dc2626',
   intercept: '#f97316',
@@ -39,6 +40,7 @@ const ACTION_LABELS: Record<string, string> = {
   cross: 'Cruzamento',
   carry: 'Condução',
   dribble: 'Drible',
+  tabela: 'Tabela',
   header: 'Cabeceio',
   tackle: 'Carrinho',
   intercept: 'Interceptação',
@@ -55,23 +57,50 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
   const players = useMemo(() => buildPlayers(homeTeam, awayTeam), [homeTeam, awayTeam]);
   const allPlayers = useMemo(() => [...players.home, ...players.away], [players]);
 
-  // Track the last ball position across minutes for continuity
+  // Track the last ball and player positions across minutes for continuity
   const lastBallPosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastPlayerPositionsRef = useRef<{ home: { x: number; y: number }[]; away: { x: number; y: number }[] } | null>(null);
 
-  const plays = useMemo(() =>
-    generateMinutePlays(minute, players.home, players.away, homeTeam, awayTeam, homeApproach, awayApproach, events, lastBallPosRef.current),
-    [minute, players, homeTeam, awayTeam, homeApproach, awayApproach, events],
-  );
+  // Apply saved player positions from previous minute for continuity
+  const playersForMinute = useMemo(() => {
+    const saved = lastPlayerPositionsRef.current;
+    if (!saved || minute === 1) return players;
+    return {
+      home: players.home.map((p, i) => ({
+        ...p,
+        currentCoord: saved.home[i] ? { ...saved.home[i] } : { ...p.currentCoord },
+      })),
+      away: players.away.map((p, i) => ({
+        ...p,
+        currentCoord: saved.away[i] ? { ...saved.away[i] } : { ...p.currentCoord },
+      })),
+    };
+  }, [players, minute]);
 
-  // Update last ball position when plays finish
+  // Find the match event for this minute (if any) to pass to the live simulation
+  const minuteEvent = useMemo(() => {
+    const minuteEvents = events.filter(e => e.minute === minute);
+    const actionEvents = minuteEvents.filter(e =>
+      !['kickoff', 'halftime', 'fulltime'].includes(e.type)
+    );
+    return actionEvents[0] ?? null;
+  }, [minute, events]);
+
+  // Check for marker events (kickoff/halftime/fulltime) for display
+  const markerEvent = useMemo(() => {
+    const minuteEvents = events.filter(e => e.minute === minute);
+    return minuteEvents.find(e =>
+      ['kickoff', 'halftime', 'fulltime'].includes(e.type)
+    ) ?? null;
+  }, [minute, events]);
+
+  // Reset state on minute 1
   useEffect(() => {
     if (minute === 1) {
       lastBallPosRef.current = null;
+      lastPlayerPositionsRef.current = null;
     }
-    if (plays.length > 0) {
-      lastBallPosRef.current = plays[plays.length - 1].ballTo;
-    }
-  }, [plays, minute]);
+  }, [minute]);
 
   const simRef = useRef<MatchSimulation | null>(null);
   const ballRef = useRef<SVGCircleElement | null>(null);
@@ -79,13 +108,19 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
   const trailRef = useRef<SVGLineElement | null>(null);
   const goalFlashRef = useRef<SVGCircleElement | null>(null);
   const saveFlashRef = useRef<SVGCircleElement | null>(null);
-  const playerRefs = useRef<Record<string, { dot: SVGCircleElement | null; outline: SVGCircleElement | null; dir: SVGLineElement | null }>>({});
+  const playerRefs = useRef<Record<string, { dot: SVGCircleElement | null; outline: SVGCircleElement | null; dir: SVGLineElement | null; label: SVGTextElement | null }>>({});
+  const refereeRef = useRef<SVGCircleElement | null>(null);
+  const linesman1Ref = useRef<SVGCircleElement | null>(null);
+  const linesman2Ref = useRef<SVGCircleElement | null>(null);
   const refsRef = useRef<SimulationRefs>({
     get ball() { return ballRef.current; },
     get shadow() { return shadowRef.current; },
     get trail() { return trailRef.current; },
     get goalFlash() { return goalFlashRef.current; },
     get saveFlash() { return saveFlashRef.current; },
+    get referee() { return refereeRef.current; },
+    get linesman1() { return linesman1Ref.current; },
+    get linesman2() { return linesman2Ref.current; },
     get players() { return playerRefs.current; },
   });
 
@@ -99,9 +134,20 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
   speedRef.current = speed;
   pausedRef.current = paused;
 
-  // (Re)start the fixed-timestep simulation loop whenever the plays change
+  // (Re)start the live simulation loop whenever the minute changes
   useEffect(() => {
-    simRef.current = new MatchSimulation(plays, players.home, players.away, speedRef.current, homeApproach, awayApproach);
+    simRef.current = new MatchSimulation(
+      minute,
+      playersForMinute.home,
+      playersForMinute.away,
+      homeTeam.id,
+      awayTeam.id,
+      speedRef.current,
+      homeApproach as string,
+      awayApproach as string,
+      minuteEvent,
+      lastBallPosRef.current,
+    );
     lastTimeRef.current = null;
     accumulatorRef.current = 0;
     setTick(n => n + 1);
@@ -145,25 +191,39 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
         trailRef.current.setAttribute('opacity', '0');
       }
 
-      if (simRef.current.isDone()) return;
+      // Capture final player positions for continuity with next minute
+      if (simRef.current.isDone()) {
+        const positions = simRef.current.getPlayerPositions();
+        const homeCount = playersForMinute.home.length;
+        lastPlayerPositionsRef.current = {
+          home: positions.slice(0, homeCount).map(p => ({ ...p })),
+          away: positions.slice(homeCount).map(p => ({ ...p })),
+        };
+        return;
+      }
       rafRef.current = requestAnimationFrame(loop);
     };
 
     rafRef.current = requestAnimationFrame(loop);
 
     return () => {
+      // Fallback: capture positions if sim hasn't finished but minute changed
+      if (simRef.current && !simRef.current.isDone()) {
+        const positions = simRef.current.getPlayerPositions();
+        const homeCount = playersForMinute.home.length;
+        lastPlayerPositionsRef.current = {
+          home: positions.slice(0, homeCount).map(p => ({ ...p })),
+          away: positions.slice(homeCount).map(p => ({ ...p })),
+        };
+      }
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     };
-  }, [plays, players]);
+  }, [minute, playersForMinute, minuteEvent]);
 
-  const currentPlay = useMemo(() => simRef.current?.getCurrentPlay() ?? (plays[0] ?? null), [tick, plays]);
+  const currentPlay = useMemo(() => simRef.current?.getCurrentPlay() ?? null, [tick]);
   const ballHolderId = currentPlay?.toPlayerId ?? currentPlay?.fromPlayerId ?? null;
-  const stepIndex = useMemo(() => simRef.current?.getCurrentStepIndex() ?? 0, [tick]);
-  const playLog = useMemo(() => {
-    const idx = simRef.current?.getCurrentStepIndex() ?? 0;
-    return plays.slice(0, idx + 1).map(s => ({ desc: s.description, action: s.action }));
-  }, [tick, plays]);
+  const playLog = useMemo(() => simRef.current?.getEventLog() ?? [], [tick]);
 
   const homeColor = homeTeam.colors.primary;
   const awayColor = awayTeam.colors.primary;
@@ -174,7 +234,7 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
     <div className="bg-gray-800 rounded-lg p-4">
       {/* Pitch SVG */}
       <div className="relative">
-        <svg viewBox="0 0 100 64" className="w-full h-56" role="img" aria-label="Campo de futebol animado">
+        <svg viewBox="0 0 100 64" className="w-full h-80" role="img" aria-label="Campo de futebol animado">
           {/* Pitch background with stripes */}
           <defs>
             <pattern id="stripes" x="0" y="0" width="10" height="64" patternUnits="userSpaceOnUse">
@@ -216,7 +276,7 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
             const secondary = isHome ? homeSecondary : awaySecondary;
             const isKeeper = p.position === 'GOL';
             const isBallHolder = p.playerId === ballHolderId;
-            const radius = isKeeper ? 2.2 : 1.8;
+            const radius = isKeeper ? 2.8 : 2.3;
 
             return (
               <g key={p.playerId}>
@@ -224,7 +284,7 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
                 <circle
                   ref={el => {
                     if (el) {
-                      if (!playerRefs.current[p.playerId]) playerRefs.current[p.playerId] = { dot: null, outline: null, dir: null };
+                      if (!playerRefs.current[p.playerId]) playerRefs.current[p.playerId] = { dot: null, outline: null, dir: null, label: null };
                       playerRefs.current[p.playerId]!.dot = el;
                     }
                   }}
@@ -233,6 +293,24 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
                   stroke={isBallHolder ? '#facc15' : secondary}
                   strokeWidth={isBallHolder ? 0.6 : 0.3}
                 />
+                {/* Shirt number */}
+                <text
+                  ref={el => {
+                    if (el) {
+                      if (!playerRefs.current[p.playerId]) playerRefs.current[p.playerId] = { dot: null, outline: null, dir: null, label: null };
+                      playerRefs.current[p.playerId]!.label = el;
+                    }
+                  }}
+                  x={p.baseCoord.x}
+                  y={(p.baseCoord.y * 0.64) + 0.7}
+                  fill="#ffffff"
+                  fontSize="2.0"
+                  fontWeight="bold"
+                  textAnchor="middle"
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}
+                >
+                  {p.shirtNumber}
+                </text>
                 {/* Keeper outline */}
                 {isKeeper && (
                   <circle
@@ -262,6 +340,36 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
               </g>
             );
           })}
+
+          {/* Referee — follows play with delay */}
+          <circle
+            ref={el => { if (el) refereeRef.current = el; }}
+            r="1.8"
+            fill="#1e293b"
+            stroke="#ffffff"
+            strokeWidth="0.3"
+            opacity="0.7"
+          />
+
+          {/* Linesman 1 — left sideline */}
+          <circle
+            ref={el => { if (el) linesman1Ref.current = el; }}
+            r="1.3"
+            fill="#facc15"
+            stroke="#1e293b"
+            strokeWidth="0.2"
+            opacity="0.6"
+          />
+
+          {/* Linesman 2 — right sideline */}
+          <circle
+            ref={el => { if (el) linesman2Ref.current = el; }}
+            r="1.3"
+            fill="#facc15"
+            stroke="#1e293b"
+            strokeWidth="0.2"
+            opacity="0.6"
+          />
 
           {/* Ball — position/radius updated by rAF */}
           <circle
@@ -322,6 +430,13 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
       </div>
 
       {/* Action indicator */}
+      {markerEvent && !currentPlay && (
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-xs font-bold px-2 py-0.5 rounded bg-gray-600 text-white">
+            {markerEvent.description}
+          </span>
+        </div>
+      )}
       {currentPlay && (
         <div className="mt-2 flex items-center gap-2">
           <span
@@ -329,9 +444,6 @@ export function PitchAnimation({ minute, homeTeam, awayTeam, homeApproach, awayA
             style={{ backgroundColor: ACTION_COLORS[currentPlay.action] ?? '#fff', color: '#1e293b' }}
           >
             {ACTION_LABELS[currentPlay.action] ?? currentPlay.action}
-          </span>
-          <span className="text-xs text-gray-400">
-            Jogada {stepIndex + 1}/{plays.length}
           </span>
         </div>
       )}

@@ -16,6 +16,9 @@ export interface SimulationMetrics {
   zoneShots: number;
   shortPasses: number;
   longPasses: number;
+  crosses: number;
+  headers: number;
+  headersWon: number;
   totalActions: number;
 }
 
@@ -29,7 +32,7 @@ export function createEmptyMetrics(): SimulationMetrics {
     },
     avgLineDistances: { def_mid: 0, mid_att: 0, def_att: 0 },
     maxClusterSize: 0, longShots: 0, zoneShots: 0,
-    shortPasses: 0, longPasses: 0, totalActions: 0,
+    shortPasses: 0, longPasses: 0, crosses: 0, headers: 0, headersWon: 0, totalActions: 0,
   };
 }
 
@@ -71,13 +74,23 @@ export class MetricsCollector {
       const inZone = isHome ? ballFrom.x > 70 : ballFrom.x < 30;
       if (inZone) this.m.zoneShots++; else this.m.longShots++;
     }
-    if (action === 'pass' || action === 'long_pass' || action === 'cross') {
+    if (action === 'cross') {
+      this.m.crosses++;
+      this.currentPasses++;
+    } else if (action === 'pass' || action === 'long_pass') {
       this.currentPasses++;
       if (passDist !== undefined && cfg) {
         if (passDist >= cfg.idealPassMin && passDist <= cfg.idealPassMax) this.m.shortPasses++;
         else if (passDist > cfg.idealPassMax) this.m.longPasses++;
       }
     }
+    if (action === 'header') {
+      this.m.headers++;
+    }
+  }
+
+  recordHeaderWon() {
+    this.m.headersWon++;
   }
 
   finalize(): SimulationMetrics {

@@ -142,6 +142,7 @@ export function computeTacticalTarget(
   p: TacticalPlayer,
   team: TeamState,
   ball: PitchCoord,
+  teammates?: TacticalPlayer[],
 ): PitchCoord {
   const base = p.baseCoord;
   const offset = rolePhaseOffset(p.position, team.phase, team.style, team.isHome);
@@ -163,11 +164,33 @@ export function computeTacticalTarget(
     ballAttraction += 0.06;
   }
 
-  const finalTarget = I.lerpCoord(
+  let finalTarget = I.lerpCoord(
     { x: tx, y: ty },
     { x: I.clamp(ball.x, bounds.minX, bounds.maxX), y: I.clamp(ball.y, bounds.minY, bounds.maxY) },
     Math.min(0.30, ballAttraction),
   );
+
+  // Awareness espacial: afasta o alvo de companheiros próximos para evitar convergência
+  if (teammates) {
+    const AWARENESS_DIST = 6.0;
+    let pushX = 0;
+    let pushY = 0;
+    for (const t of teammates) {
+      if (t.playerId === p.playerId) continue;
+      const dx = finalTarget.x - t.currentCoord.x;
+      const dy = finalTarget.y - t.currentCoord.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0 && dist < AWARENESS_DIST) {
+        const force = (AWARENESS_DIST - dist) / AWARENESS_DIST * 2.0;
+        pushX += (dx / dist) * force;
+        pushY += (dy / dist) * force;
+      }
+    }
+    finalTarget = {
+      x: finalTarget.x + pushX,
+      y: finalTarget.y + pushY,
+    };
+  }
 
   return {
     x: I.clamp(finalTarget.x, bounds.minX, bounds.maxX),
@@ -361,13 +384,13 @@ export function scoreOnBallDecision(
     // Bônus por manter posse com passes curtos e seguros
     let possessionBonus = 0;
     if (d >= cfg.idealPassMin && d <= cfg.idealPassMax && targetPressure < 8) {
-      possessionBonus = cfg.buildUpBonus;
+      possessionBonus = cfg.buildUpBonus + 4; // reforça jogo cadenciado
     }
 
     // Passe para trás/lateral na defesa ajuda a construir, mas deve ir para MEI/VOL de preferência
     let buildUpTargetBonus = 0;
     if (!isForward && (t.position === 'VOL' || t.position === 'MEI')) {
-      buildUpTargetBonus = 6;
+      buildUpTargetBonus = 8; // valoriza troca de bola paciente
     }
 
     // Progressão frontal é recompensada só quando o alvo está bem posicionado e desmarcado
@@ -377,16 +400,31 @@ export function scoreOnBallDecision(
       if (targetInFinalThird) forwardBonus += 4;
       if (free) forwardBonus += 4;
     }
+    // Passe entre linhas: alvo entre duas linhas defensivas adversárias
+    const nearbyOpps = opponents.filter(o => Math.abs(o.currentCoord.x - t.currentCoord.x) < 8);
+    const throughLines = nearbyOpps.length >= 2 && isForward && free;
+    if (throughLines) {
+      forwardBonus += 10;
+    }
+    // No terço final, passes criativos para frente são mais valorizados
+    if (inFinalThird(ball, isHome) && isForward && (t.position === 'ATA' || t.position === 'MEI')) {
+      forwardBonus += 6;
+    }
 
     // Ações por distância
     let action: 'pass' | 'long_pass' | 'cross' = 'pass';
     if (d > cfg.idealPassMax) action = 'long_pass';
-    if (Math.abs(t.currentCoord.y - ball.y) > 18 && targetInFinalThird && t.position === 'ATA') {
+    // Cruzamento: holder no terço final e alvo na área, ou lateral perto da linha de fundo
+    const holderInFinalThird = inFinalThird(ball, isHome);
+    const targetInBox = targetInFinalThird && Math.abs(t.currentCoord.y - 50) < 25;
+    const holderNearByline = holderInFinalThird && Math.abs(ball.y - 50) > 25;
+    if ((holderNearByline || (holderInFinalThird && targetInBox)) && d > 10 &&
+        (t.position === 'ATA' || t.position === 'MEI' || t.position === 'LAT')) {
       action = 'cross';
     }
 
-    // Lançamentos longos são penalizados, a menos que o time seja muito direto
-    const longPassPenalty = action === 'long_pass' ? 18 + (ownField ? 12 : 0) - style.riskTaking * 8 : 0;
+    // Lançamentos longos são fortemente penalizados — jogo cadenciado prefere passes curtos
+    const longPassPenalty = action === 'long_pass' ? 22 + (ownField ? 14 : 0) - style.riskTaking * 8 : 0;
 
     const visibility = (t.attributes.vision + holder.attributes.vision) * 0.12;
     const risk = targetPressure * 1.6 + obstructed * 6 + (free ? 0 : 5);
@@ -401,7 +439,7 @@ export function scoreOnBallDecision(
       risk -
       longPassPenalty;
 
-    const typeBonus = action === 'cross' ? style.attackingWidth * 6 : 0;
+    const typeBonus = action === 'cross' ? style.attackingWidth * 10 + 5 : 0;
 
     options.push({
       action,
@@ -438,13 +476,22 @@ export function scoreOnBallDecision(
 
   // 4. Drible curto ----------------------------------------------------
   const dribbleTarget = { x: I.clamp(ball.x + dir * 3, 1, 99), y: I.clamp(ball.y + (Math.random() - 0.5) * 8, 1, 99) };
-  const dribbleScore =
+  const inAttackingThird = inFinalThird(ball, isHome);
+  let dribbleScore =
     12 +
     holder.attributes.technique * 0.25 +
     (100 - pressure) * 0.15 +
     style.riskTaking * 5 -
     (holder.position === 'ZAG' ? 25 : 0) -
     (ownField ? 5 : 0);
+  // No terco final, drible e muito mais valorizado
+  if (inAttackingThird) {
+    dribbleScore += 18 + (holder.position === 'ATA' || holder.position === 'MEI' ? 10 : 0);
+    if (pressure > 5) dribbleScore += 8;
+  }
+  if ((holder.position === 'ATA' || holder.position === 'MEI') && holder.attributes.technique > 70) {
+    dribbleScore += 6;
+  }
 
   options.push({
     action: 'dribble',
@@ -453,6 +500,38 @@ export function scoreOnBallDecision(
     score: dribbleScore,
     description: `${holder.name} dribla.`,
   });
+
+  // 5. Tabela (passe e vai) -------------------------------------------
+  if (teammates.length > 0) {
+    const nearbyTeammates = teammates
+      .filter(t => I.distance(ball, t.currentCoord) >= 3 && I.distance(ball, t.currentCoord) <= 12)
+      .sort((a, b) => I.distance(ball, a.currentCoord) - I.distance(ball, b.currentCoord));
+    if (nearbyTeammates.length > 0) {
+      const tabelaPartner = nearbyTeammates[0];
+      const partnerPressure = defenderPressure(tabelaPartner.currentCoord, opponents);
+      const runTarget = {
+        x: I.clamp(ball.x + dir * 12, 1, 99),
+        y: I.clamp(ball.y + (Math.random() - 0.5) * 10, 1, 99),
+      };
+      const tabelaScore =
+        15 +
+        holder.attributes.technique * 0.15 +
+        holder.attributes.vision * 0.1 +
+        tabelaPartner.attributes.technique * 0.1 +
+        (inAttackingThird ? 20 : 5) +
+        (pressure > 4 ? 10 : 0) +
+        style.riskTaking * 4 -
+        partnerPressure * 1.2 -
+        (ownField ? 3 : 0);
+      options.push({
+        action: 'tabela',
+        targetId: tabelaPartner.playerId,
+        ballTo: runTarget,
+        score: tabelaScore,
+        description: `${holder.name} faz tabela com ${tabelaPartner.name}.`,
+      });
+    }
+  }
 
   // 5. Chutão/clearance (apenas quando pressionado em campo próprio) ----
   if (ownField && pressure > 7 && (holder.position === 'GOL' || holder.position === 'ZAG' || holder.position === 'VOL')) {
@@ -469,10 +548,10 @@ export function scoreOnBallDecision(
     });
   }
 
-  // aleatoriedade controlada (peso reduzido para decisões mais coerentes)
+  // aleatoriedade controlada (peso reduzido para decisões mais coerentes e cadenciadas)
   return options.map(o => ({
     ...o,
-    score: o.score + (Math.random() - 0.5) * cfg.randomness * 30,
+    score: o.score + (Math.random() - 0.5) * cfg.randomness * 20,
   }));
 }
 

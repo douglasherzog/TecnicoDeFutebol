@@ -15,6 +15,7 @@ export interface PlayerOnPitch {
   teamId: string;
   baseCoord: PitchCoord;
   currentCoord: PitchCoord;
+  shirtNumber: number;
 }
 
 export type PlayAction =
@@ -23,6 +24,7 @@ export type PlayAction =
   | 'cross'
   | 'carry'
   | 'dribble'
+  | 'tabela'
   | 'header'
   | 'tackle'
   | 'intercept'
@@ -136,6 +138,7 @@ export function buildPlayers(homeTeam: Team, awayTeam: Team): { home: PlayerOnPi
     teamId: homeTeam.id,
     baseCoord: homeCoords[i] ?? { x: 30, y: 50 },
     currentCoord: homeCoords[i] ?? { x: 30, y: 50 },
+    shirtNumber: i + 1,
   }));
 
   const away = awayLineup.slice(0, 11).map((player, i): PlayerOnPitch => {
@@ -147,6 +150,7 @@ export function buildPlayers(homeTeam: Team, awayTeam: Team): { home: PlayerOnPi
       teamId: awayTeam.id,
       baseCoord: base,
       currentCoord: base,
+      shirtNumber: i + 1,
     };
   });
 
@@ -299,7 +303,7 @@ function resolveEvent(
   minute: number,
   steps: PlayStep[],
 ): void {
-  const goalCoord: PitchCoord = isHome ? { x: 97, y: 50 } : { x: 3, y: 50 };
+  const goalCoord: PitchCoord = isHome ? { x: 99, y: 50 } : { x: 1, y: 50 };
 
   switch (event.type) {
     case 'goal':
@@ -357,8 +361,8 @@ function resolveEvent(
     case 'miss':
     case 'penalty_miss': {
       const missCoord: PitchCoord = event.type === 'penalty_miss'
-        ? { x: isHome ? 97 : 3, y: 20 + Math.random() * 60 }
-        : { x: isHome ? 97 : 3, y: 28 + Math.random() * 44 };
+        ? { x: isHome ? 99 : 1, y: 20 + Math.random() * 60 }
+        : { x: isHome ? 99 : 1, y: 28 + Math.random() * 44 };
       steps.push({
         action: 'shot',
         fromPlayerId: shooter.playerId,
@@ -603,7 +607,7 @@ export function generatePlaySequence(
   // Match event: build up toward the event location and resolve it visibly
   if (matchEvent) {
     const keeper = getKeeper(defenders);
-    const goalCoord: PitchCoord = isHome ? { x: 97, y: 50 } : { x: 3, y: 50 };
+    const goalCoord: PitchCoord = isHome ? { x: 99, y: 50 } : { x: 1, y: 50 };
     let targetPos = currentPos;
 
     if (['goal', 'save', 'miss'].includes(matchEvent.type)) {
@@ -670,7 +674,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -688,7 +692,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -698,7 +702,7 @@ export function generatePlaySequence(
       target = currentHolder;
       action = 'carry';
       const carryDist = 4 + Math.random() * 6;
-      ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+      ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
       playerFrom = { ...currentHolder.currentCoord };
       playerTo = moveHolderTo(currentHolder, ballTo);
       description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -707,7 +711,7 @@ export function generatePlaySequence(
       target = currentHolder;
       action = 'dribble';
       const dribbleDist = 4 + Math.random() * 6;
-      ballTo = { x: clamp(currentPos.x + activeDir * dribbleDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 10, 5, 95) };
+      ballTo = { x: clamp(currentPos.x + activeDir * dribbleDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 10, 5, 95) };
       playerFrom = { ...currentHolder.currentCoord };
       playerTo = moveHolderTo(currentHolder, ballTo);
       description = `${currentHolder.name} ${pick(DRIBBLE_VERBS)}.`;
@@ -725,7 +729,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -744,7 +748,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -763,7 +767,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -782,7 +786,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -804,7 +808,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -872,7 +876,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -881,7 +885,7 @@ export function generatePlaySequence(
     } else if (i === numActions - 1 && ballProgress > 0.75) {
       target = currentHolder;
       action = 'shot';
-      ballTo = { x: isHome ? 97 : 3, y: 28 + Math.random() * 44 };
+      ballTo = { x: isHome ? 99 : 1, y: 28 + Math.random() * 44 };
       description = `${currentHolder.name} arrisca! Bola para fora.`;
       durationMs = durationForDistance(dist(currentPos, ballTo), 600, 30);
     } else {
@@ -897,7 +901,7 @@ export function generatePlaySequence(
         target = currentHolder;
         action = 'carry';
         const carryDist = 4 + Math.random() * 6;
-        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 3, 97), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
+        ballTo = { x: clamp(currentPos.x + activeDir * carryDist, 1, 99), y: clamp(currentPos.y + (Math.random() - 0.5) * 8, 5, 95) };
         playerFrom = { ...currentHolder.currentCoord };
         playerTo = moveHolderTo(currentHolder, ballTo);
         description = `${currentHolder.name} ${pick(CARRY_VERBS)}.`;
@@ -945,12 +949,17 @@ export function generateMinutePlays(
   let currentBallPos = startBallPos ?? null;
 
   for (const event of markerEvents) {
+    const nearestPlayer = [...homePlayers, ...awayPlayers].reduce((c, p) =>
+      dist(p.currentCoord, { x: 50, y: 50 }) < dist(c.currentCoord, { x: 50, y: 50 }) ? p : c,
+    );
     allSteps.push({
       action: 'build_up',
-      fromPlayerId: '',
-      toPlayerId: '',
+      fromPlayerId: nearestPlayer.playerId,
+      toPlayerId: nearestPlayer.playerId,
       ballFrom: { x: 50, y: 50 },
       ballTo: { x: 50, y: 50 },
+      playerFrom: { ...nearestPlayer.currentCoord },
+      playerTo: { ...nearestPlayer.currentCoord },
       description: event.description,
       durationMs: 1200,
       minute,

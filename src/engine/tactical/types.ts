@@ -15,7 +15,8 @@ export type PlayerAIState =
   | 'shooting' // finalizando
   | 'clearing' // afastando perigo
   | 'saving' // goleiro defendendo
-  | 'goalkeeping'; // goleiro posicionado na área
+  | 'goalkeeping' // goleiro posicionado na área
+  | 'contesting_header'; // disputando bola aérea após cruzamento
 
 /** Fase coletiva do time no momento. */
 export type TeamPhase =
@@ -96,7 +97,7 @@ export interface TacticalConfig {
 }
 
 export const DEFAULT_TACTICAL_CONFIG: TacticalConfig = {
-  ticksPerMinute: 40,
+  ticksPerMinute: 60,
   nearbyDistance: 12,
   shootingDistance: 22,
   randomness: 0.25,

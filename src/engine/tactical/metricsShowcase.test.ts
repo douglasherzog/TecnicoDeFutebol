@@ -59,6 +59,9 @@ function aggregateMetrics(all: SimulationMetrics[]): SimulationMetrics {
     zoneShots: acc.zoneShots + m.zoneShots,
     shortPasses: acc.shortPasses + m.shortPasses,
     longPasses: acc.longPasses + m.longPasses,
+    crosses: acc.crosses + m.crosses,
+    headers: acc.headers + m.headers,
+    headersWon: acc.headersWon + m.headersWon,
     totalActions: acc.totalActions + m.totalActions,
   }), {
     totalPossessions: 0, avgPassesPerPossession: 0,
@@ -69,7 +72,7 @@ function aggregateMetrics(all: SimulationMetrics[]): SimulationMetrics {
     },
     avgLineDistances: { def_mid: 0, mid_att: 0, def_att: 0 },
     maxClusterSize: 0, longShots: 0, zoneShots: 0,
-    shortPasses: 0, longPasses: 0, totalActions: 0,
+    shortPasses: 0, longPasses: 0, crosses: 0, headers: 0, headersWon: 0, totalActions: 0,
   });
 
   const n = all.length;
@@ -108,6 +111,8 @@ function printMetrics(label: string, m: SimulationMetrics) {
   console.log(`Ações totais:    ${m.totalActions}`);
   console.log(`Passes curtos:   ${m.shortPasses}`);
   console.log(`Passes longos:   ${m.longPasses}`);
+  console.log(`Cruzamentos:     ${m.crosses}`);
+  console.log(`Cabeceios:       ${m.headers} (ganhou: ${m.headersWon})`);
   console.log(`Chutes na zona:  ${m.zoneShots}`);
   console.log(`Chutes longos:   ${m.longShots}`);
   console.log(`Aglomeração max: ${m.maxClusterSize} jogadores em raio de 5`);

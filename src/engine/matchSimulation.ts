@@ -1,13 +1,19 @@
 import type { PlayStep, PlayerOnPitch, PitchCoord, PlayAction } from './pitchEngine';
 import * as I from './interpolation';
 import {
-  computeKeeperTarget,
-  computeTacticalTarget,
   detectTeamPhase,
   enrichPlayers,
 } from './tactical/ai';
-import { styleFromApproach } from './tactical/minuteSimulator';
+import {
+  styleFromApproach,
+  simulateOneTick,
+  goalFor,
+  jitter,
+  actionDuration,
+  findHolder,
+} from './tactical/minuteSimulator';
 import { DEFAULT_TACTICAL_CONFIG, type TacticalConfig, type TeamState, type TacticalPlayer } from './tactical/types';
+import type { MatchEvent } from '../types';
 
 /** Configurable simulation constants. Tune these for feel. */
 export const SIMULATION_CONFIG = {
@@ -16,7 +22,7 @@ export const SIMULATION_CONFIG = {
   /** Vertical scaling applied to pitch Y when rendering on the 2D view. */
   Y_SCALE: 0.64,
   /** Ball base radius in SVG units. */
-  BALL_BASE_RADIUS: 1.0,
+  BALL_BASE_RADIUS: 1.4,
   /** How much the ball grows with height. */
   BALL_HEIGHT_SCALE: 0.08,
   /** Default ball curve direction; sign alternates per step. */
@@ -51,42 +57,19 @@ interface SimBall {
   currentHeight: number;
 }
 
-interface StepCache {
-  control: PitchCoord;
-  height: number;
-  side: number;
-}
-
 export interface SimulationRefs {
   ball: SVGCircleElement | null;
   shadow: SVGEllipseElement | null;
   trail: SVGLineElement | null;
   goalFlash: SVGCircleElement | null;
   saveFlash: SVGCircleElement | null;
+  referee: SVGCircleElement | null;
+  linesman1: SVGCircleElement | null;
+  linesman2: SVGCircleElement | null;
   players: Record<
     string,
-    { dot: SVGCircleElement | null; outline: SVGCircleElement | null; dir: SVGLineElement | null } | undefined
+    { dot: SVGCircleElement | null; outline: SVGCircleElement | null; dir: SVGLineElement | null; label: SVGTextElement | null } | undefined
   >;
-}
-
-function curveFactorForAction(action: PlayAction): number {
-  switch (action) {
-    case 'long_pass':
-    case 'throw_in':
-    case 'corner':
-      return 0.35;
-    case 'cross':
-    case 'header':
-      return 0.22;
-    case 'shot':
-      return 0.05;
-    case 'clearance':
-      return 0.15;
-    case 'pass':
-      return 0.12;
-    default:
-      return 0.04;
-  }
 }
 
 function maxHeightForAction(action: PlayAction): number {
@@ -103,8 +86,10 @@ function maxHeightForAction(action: PlayAction): number {
     case 'header':
       return 10;
     case 'pass':
+    case 'tabela':
       return 2.5;
     case 'dribble':
+      return 0.8;
     case 'carry':
       return 0.6;
     default:
@@ -115,42 +100,70 @@ function maxHeightForAction(action: PlayAction): number {
 // Player positioning is now unified with the tactical AI via computeTacticalTarget() and computeKeeperTarget().
 
 export class MatchSimulation {
-  private plays: PlayStep[];
   private players: SimPlayer[];
   private ball: SimBall;
   private speed: number;
-  private stepIndex = 0;
-  private stepStartTime = 0;
   private logicTime = 0;
-  private stepCache: StepCache | null = null;
+  private lastTacticalTick = 0;
+  private tacticalTickInterval: number;
   private done = false;
   private homeTeam: TeamState;
   private awayTeam: TeamState;
   private cfg: TacticalConfig;
   private homeCount: number;
+  private refereePos: PitchCoord = { x: 50, y: 50 };
+  private currentEvent: PlayStep | null = null;
+  private eventLog: { desc: string; action: string }[] = [];
+  private matchEvent: MatchEvent | null = null;
+  private eventInjected = false;
+  private tacticalTicksRun = 0;
+  private totalTacticalTicks: number;
+  private minute: number;
+  private homeTeamId: string;
+  private awayTeamId: string;
+  private ballHeight = 0;
+  private prevBallHeight = 0;
 
   constructor(
-    plays: PlayStep[],
+    minute: number,
     homePlayers: PlayerOnPitch[],
     awayPlayers: PlayerOnPitch[],
+    homeTeamId: string,
+    awayTeamId: string,
     speed = 1,
     homeApproach = 'balanced',
     awayApproach = 'balanced',
+    matchEvent: MatchEvent | null = null,
+    startBallPos: PitchCoord | null = null,
     cfg: TacticalConfig = DEFAULT_TACTICAL_CONFIG,
   ) {
-    this.plays = plays;
     this.speed = speed;
     this.cfg = cfg;
+    this.minute = minute;
+    this.homeTeamId = homeTeamId;
+    this.awayTeamId = awayTeamId;
+    this.matchEvent = matchEvent;
+    this.totalTacticalTicks = cfg.ticksPerMinute;
+
+    // Tactical tick interval: 45 seconds real time per minute / ticksPerMinute
+    this.tacticalTickInterval = 45000 / cfg.ticksPerMinute;
 
     const homeTactical = enrichPlayers(homePlayers);
     const awayTactical = enrichPlayers(awayPlayers);
+
+    const startPos = startBallPos ?? { x: 50, y: 50 };
+
+    // Decide initial possession based on proximity to ball
+    const nearestHome = homeTactical.reduce((c, p) => (I.distance(p.currentCoord, startPos) < I.distance(c.currentCoord, startPos) ? p : c));
+    const nearestAway = awayTactical.reduce((c, p) => (I.distance(p.currentCoord, startPos) < I.distance(c.currentCoord, startPos) ? p : c));
+    const homeCloser = I.distance(nearestHome.currentCoord, startPos) <= I.distance(nearestAway.currentCoord, startPos);
 
     this.homeTeam = {
       players: homeTactical,
       isHome: true,
       style: styleFromApproach(homeApproach),
-      phase: 'attacking_organized',
-      hasPossession: true,
+      phase: homeCloser ? 'attacking_organized' : 'defending_organized',
+      hasPossession: homeCloser,
       lastPhase: 'attacking_organized',
       goals: 0,
     };
@@ -158,11 +171,14 @@ export class MatchSimulation {
       players: awayTactical,
       isHome: false,
       style: styleFromApproach(awayApproach),
-      phase: 'defending_organized',
-      hasPossession: false,
+      phase: homeCloser ? 'defending_organized' : 'attacking_organized',
+      hasPossession: !homeCloser,
       lastPhase: 'defending_organized',
       goals: 0,
     };
+
+    const holder = homeCloser ? nearestHome : nearestAway;
+    holder.state = 'carrying';
 
     this.homeCount = homeTactical.length;
     this.players = [...homeTactical, ...awayTactical].map(p => ({
@@ -175,17 +191,12 @@ export class MatchSimulation {
       base: { ...p.baseCoord },
     }));
 
-    const startPos = plays.length > 0 ? { ...plays[0].ballFrom } : { x: 50, y: 50 };
     this.ball = {
-      previous: startPos,
-      current: startPos,
+      previous: { ...startPos },
+      current: { ...startPos },
       previousHeight: 0,
       currentHeight: 0,
     };
-
-    if (this.plays.length > 0) {
-      this.stepCache = this.computeStepCache(this.plays[0]);
-    }
   }
 
   setSpeed(speed: number) {
@@ -193,11 +204,15 @@ export class MatchSimulation {
   }
 
   getCurrentPlay(): PlayStep | null {
-    return this.plays[this.stepIndex] ?? null;
+    return this.currentEvent;
   }
 
   getCurrentStepIndex(): number {
-    return this.stepIndex;
+    return this.tacticalTicksRun;
+  }
+
+  getEventLog(): { desc: string; action: string }[] {
+    return this.eventLog;
   }
 
   isDone(): boolean {
@@ -208,25 +223,30 @@ export class MatchSimulation {
     return TICK_INTERVAL_MS;
   }
 
-  /** Advance simulation by one fixed timestep. `dtMs` is real elapsed time since last tick. */
-  tick(dtMs: number) {
-    if (this.done || this.plays.length === 0) return;
+  getBallPosition(): PitchCoord {
+    return { ...this.ball.current };
+  }
 
-    const step = this.plays[this.stepIndex];
-    const stepDuration = step.durationMs;
+  getPlayerPositions(): PitchCoord[] {
+    return this.players.map(p => ({ ...p.current }));
+  }
+
+  getRefereePosition(): PitchCoord {
+    return { ...this.refereePos };
+  }
+
+  /** Advance simulation by one fixed timestep. Runs simulateOneTick live — no pre-computed plays. */
+  tick(dtMs: number) {
+    if (this.done) return;
+
     this.logicTime += dtMs * this.speed;
 
-    while (this.logicTime - this.stepStartTime >= stepDuration) {
-      this.stepStartTime += stepDuration;
-      this.stepIndex++;
-      if (this.stepIndex >= this.plays.length) {
-        this.done = true;
-        return;
-      }
-      this.stepCache = this.computeStepCache(this.plays[this.stepIndex]);
+    // Run tactical ticks as needed
+    while (this.logicTime - this.lastTacticalTick >= this.tacticalTickInterval) {
+      this.lastTacticalTick += this.tacticalTickInterval;
+      this.runTacticalTick();
+      if (this.done) break;
     }
-
-    this.updateBallAndPlayers(dtMs * this.speed / 1000);
   }
 
   /** Draw the interpolated frame by mutating the provided SVG refs directly. */
@@ -248,7 +268,7 @@ export class MatchSimulation {
       refs.shadow.setAttribute('ry', (0.3 + visualHeight * 0.015).toFixed(2));
     }
 
-    const step = this.plays[this.stepIndex];
+    const step = this.currentEvent;
     if (refs.trail && step) {
       refs.trail.setAttribute('x1', step.ballFrom.x.toFixed(2));
       refs.trail.setAttribute('y1', (step.ballFrom.y * yScale).toFixed(2));
@@ -285,12 +305,33 @@ export class MatchSimulation {
       }
 
       if (p.playerId === holderId) {
-        ref.dot.setAttribute('r', (p.position === 'GOL' ? 2.4 : 2.0).toFixed(2));
+        ref.dot.setAttribute('r', (p.position === 'GOL' ? 3.0 : 2.5).toFixed(2));
       } else if (p.position === 'GOL') {
-        ref.dot.setAttribute('r', '2.2');
+        ref.dot.setAttribute('r', '2.8');
       } else {
-        ref.dot.setAttribute('r', '1.8');
+        ref.dot.setAttribute('r', '2.3');
       }
+
+      if (ref.label) {
+        ref.label.setAttribute('x', cx);
+        ref.label.setAttribute('y', (parseFloat(cy) + 0.8).toFixed(2));
+      }
+    }
+
+    // Referee — position computed in runTacticalTick via updateReferee
+    if (refs.referee) {
+      refs.referee.setAttribute('cx', this.refereePos.x.toFixed(2));
+      refs.referee.setAttribute('cy', (this.refereePos.y * yScale).toFixed(2));
+    }
+
+    // Linesmen — track ball X position along their sidelines
+    if (refs.linesman1) {
+      refs.linesman1.setAttribute('cx', visualBall.x.toFixed(2));
+      refs.linesman1.setAttribute('cy', '1.5');
+    }
+    if (refs.linesman2) {
+      refs.linesman2.setAttribute('cx', visualBall.x.toFixed(2));
+      refs.linesman2.setAttribute('cy', (64 - 1.5).toFixed(2));
     }
 
     // Goal flash ring
@@ -326,81 +367,362 @@ export class MatchSimulation {
     }
   }
 
-  private computeStepCache(step: PlayStep): StepCache {
-    const side = Math.sin(this.stepIndex * 123.456) > 0 ? 1 : -1;
-    const height = maxHeightForAction(step.action);
-    const control = I.bezierControlPoint(
-      step.ballFrom,
-      step.ballTo,
-      curveFactorForAction(step.action),
-      side,
-    );
-    return { control, height, side };
-  }
+  /** Run one live tactical tick — the core of the continuous simulation. */
+  private runTacticalTick() {
+    this.tacticalTicksRun++;
 
-  private updateBallAndPlayers(dt: number) {
-    const step = this.plays[this.stepIndex];
-    if (!step || !this.stepCache) return;
+    // Check if we need to inject a match event (goal/save/miss)
+    if (this.matchEvent && !this.eventInjected) {
+      const eventTypes = ['goal', 'save', 'miss', 'penalty_goal', 'penalty_miss', 'own_goal'];
+      if (eventTypes.includes(this.matchEvent.type)) {
+        if (this.tacticalTicksRun >= Math.floor(this.totalTacticalTicks * 0.8)) {
+          this.injectMatchEvent();
+          this.eventInjected = true;
+          return;
+        }
+      }
+    }
 
-    const stepElapsed = this.logicTime - this.stepStartTime;
-    const rawProgress = step.durationMs > 0 ? stepElapsed / step.durationMs : 1;
-    const progress = I.clamp(rawProgress, 0, 1);
-    const eased = I.easeInOutQuad(progress);
+    if (this.tacticalTicksRun >= this.totalTacticalTicks) {
+      this.done = true;
+      return;
+    }
 
-    const flight = I.computeBallFlight(
-      step.ballFrom,
-      step.ballTo,
-      this.stepCache.control,
-      eased,
-      this.stepCache.height,
-    );
+    // Run the live tactical simulation — this is the core call
+    const result = simulateOneTick(this.homeTeam, this.awayTeam, this.ball.current, this.cfg);
 
-    this.ball.previous = this.ball.current;
-    this.ball.current = flight.position;
-    this.ball.previousHeight = this.ball.currentHeight;
-    this.ball.currentHeight = flight.height;
+    // Update ball position from tactical result
+    this.ball.previous = { ...this.ball.current };
+    this.ball.current = result.ball;
 
-    const holderId = step.toPlayerId;
+    // Track current event for display
+    if (result.event) {
+      this.currentEvent = { ...result.event, minute: this.minute };
+      this.eventLog.push({ desc: result.event.description, action: result.event.action });
+      if (this.eventLog.length > 30) this.eventLog.shift();
+    } else {
+      this.currentEvent = null;
+    }
 
-    // Update team phases based on ball position
+    // Sync sim player positions from tactical state
+    for (let i = 0; i < this.players.length; i++) {
+      this.players[i].previous = { ...this.players[i].current };
+      const tacticalIdx = i < this.homeCount ? i : i - this.homeCount;
+      const team = i < this.homeCount ? this.homeTeam : this.awayTeam;
+      this.players[i].current = { ...team.players[tacticalIdx].currentCoord };
+      this.players[i].currentCoord = { ...team.players[tacticalIdx].currentCoord };
+
+      const dx = this.players[i].current.x - this.players[i].previous.x;
+      const dy = this.players[i].current.y - this.players[i].previous.y;
+      const moveDist = Math.hypot(dx, dy);
+      this.players[i].previousAngle = this.players[i].currentAngle;
+      if (moveDist > 0.1) {
+        this.players[i].currentAngle = Math.atan2(dy, dx);
+      }
+    }
+
+    // Update ball height based on current event
+    this.prevBallHeight = this.ballHeight;
+    this.ballHeight = this.currentEvent ? maxHeightForAction(this.currentEvent.action) : 0;
+    this.ball.previousHeight = this.prevBallHeight;
+    this.ball.currentHeight = this.ballHeight;
+
+    // Update team phases
     this.homeTeam.phase = detectTeamPhase(this.homeTeam.hasPossession, this.homeTeam.phase, this.ball.current.x, true);
     this.awayTeam.phase = detectTeamPhase(this.awayTeam.hasPossession, this.awayTeam.phase, this.ball.current.x, false);
 
-    // Sync tactical player positions with sim player positions
-    for (const p of this.players) {
-      p.currentCoord = { ...p.current };
+    // Physics
+    const holderId = this.currentEvent?.toPlayerId ?? findHolder(this.homeTeam.hasPossession ? this.homeTeam : this.awayTeam)?.playerId ?? null;
+    this.resolvePhysics(holderId);
+    this.updateReferee();
+  }
+
+  /** Inject a pre-determined match event (goal/save/miss) into the live simulation. */
+  private injectMatchEvent() {
+    if (!this.matchEvent) return;
+
+    const attacker = this.matchEvent.teamId === this.homeTeamId ? this.homeTeam : this.awayTeam;
+    const defender = this.matchEvent.teamId === this.homeTeamId ? this.awayTeam : this.homeTeam;
+    const goal = goalFor(attacker.isHome);
+    const shooter = attacker.players.reduce((c, p) =>
+      I.distance(p.currentCoord, this.ball.current) < I.distance(c.currentCoord, this.ball.current) ? p : c,
+    );
+
+    shooter.currentCoord = { ...this.ball.current };
+    const shotFrom = { ...this.ball.current };
+    const shotTo = jitter(goal, 4);
+
+    this.currentEvent = {
+      action: 'shot',
+      fromPlayerId: shooter.playerId,
+      toPlayerId: null,
+      ballFrom: shotFrom,
+      ballTo: shotTo,
+      playerFrom: { ...shotFrom },
+      playerTo: { ...shotTo },
+      description: `${shooter.name} finaliza para o gol!`,
+      durationMs: actionDuration('shot', I.distance(shotFrom, shotTo)),
+      minute: this.minute,
+    };
+    this.eventLog.push({ desc: this.currentEvent.description, action: 'shot' });
+
+    this.ball.previous = { ...shotFrom };
+    this.ball.current = { ...shotTo };
+    this.prevBallHeight = 0;
+    this.ballHeight = maxHeightForAction('shot');
+    this.ball.previousHeight = 0;
+    this.ball.currentHeight = this.ballHeight;
+
+    const shooterIdx = this.players.findIndex(p => p.playerId === shooter.playerId);
+    if (shooterIdx >= 0) {
+      this.players[shooterIdx].previous = { ...shotFrom };
+      this.players[shooterIdx].current = { ...shotTo };
     }
 
-    for (const p of this.players) {
-      let target: PitchCoord;
-      if (p.playerId === holderId && step.playerTo) {
-        const from = step.playerFrom ?? step.ballFrom;
-        target = I.lerpCoord(from, step.playerTo, eased);
+    if (this.matchEvent.type === 'goal' || this.matchEvent.type === 'penalty_goal') {
+      this.currentEvent = {
+        action: 'goal', fromPlayerId: shooter.playerId, toPlayerId: null,
+        ballFrom: { ...shotTo }, ballTo: { ...shotTo },
+        description: this.matchEvent.description, durationMs: 1800, minute: this.minute,
+      };
+      this.eventLog.push({ desc: this.matchEvent.description, action: 'goal' });
+      attacker.goals++;
+    } else if (this.matchEvent.type === 'save') {
+      const keeper = defender.players.find(p => p.position === 'GOL') ?? defender.players[0];
+      this.currentEvent = {
+        action: 'save', fromPlayerId: keeper.playerId, toPlayerId: null,
+        ballFrom: { ...shotTo }, ballTo: { ...shotTo },
+        description: this.matchEvent.description, durationMs: 1200, minute: this.minute,
+      };
+      this.eventLog.push({ desc: this.matchEvent.description, action: 'save' });
+      keeper.currentCoord = { ...shotTo };
+      keeper.state = 'carrying';
+      attacker.hasPossession = false;
+      defender.hasPossession = true;
+    } else if (this.matchEvent.type === 'miss' || this.matchEvent.type === 'penalty_miss') {
+      this.currentEvent = {
+        action: 'shot', fromPlayerId: shooter.playerId, toPlayerId: null,
+        ballFrom: { ...shotFrom }, ballTo: { ...shotTo },
+        description: this.matchEvent.description,
+        durationMs: actionDuration('shot', I.distance(shotFrom, shotTo)), minute: this.minute,
+      };
+      this.eventLog.push({ desc: this.matchEvent.description, action: 'shot' });
+    } else if (this.matchEvent.type === 'own_goal') {
+      this.currentEvent = {
+        action: 'goal', fromPlayerId: shooter.playerId, toPlayerId: null,
+        ballFrom: { ...shotTo }, ballTo: goalFor(attacker.isHome),
+        description: this.matchEvent.description, durationMs: 1800, minute: this.minute,
+      };
+      this.eventLog.push({ desc: this.matchEvent.description, action: 'goal' });
+      defender.goals++;
+    }
+
+    this.homeTeam.phase = detectTeamPhase(this.homeTeam.hasPossession, this.homeTeam.phase, this.ball.current.x, true);
+    this.awayTeam.phase = detectTeamPhase(this.awayTeam.hasPossession, this.awayTeam.phase, this.ball.current.x, false);
+  }
+
+  /** Update referee position to follow the ball with safe offset. */
+  private updateReferee() {
+    const REFEREE_OFFSET = 12.0;
+    const REFEREE_LERP = 0.06;
+    const ballPos = this.ball.current;
+    const refToBall = { x: ballPos.x - this.refereePos.x, y: ballPos.y - this.refereePos.y };
+    const refToBallDist = Math.hypot(refToBall.x, refToBall.y);
+
+    if (refToBallDist > 0) {
+      if (refToBallDist < REFEREE_OFFSET) {
+        const pushDir = { x: -refToBall.x / refToBallDist, y: -refToBall.y / refToBallDist };
+        const pushAmount = (REFEREE_OFFSET - refToBallDist) * 0.15;
+        this.refereePos.x = I.clamp(this.refereePos.x + pushDir.x * pushAmount, 1, 99);
+        this.refereePos.y = I.clamp(this.refereePos.y + pushDir.y * pushAmount, 1, 99);
       } else {
-        const team = p === this.players[this.homeCount - 1] || this.players.indexOf(p) < this.homeCount ? this.homeTeam : this.awayTeam;
-        if (p.position === 'GOL') {
-          target = computeKeeperTarget(p, team, this.ball.current, team.isHome);
-        } else {
-          target = computeTacticalTarget(p, team, this.ball.current);
+        this.refereePos.x = I.lerp(this.refereePos.x, ballPos.x, REFEREE_LERP);
+        this.refereePos.y = I.lerp(this.refereePos.y, ballPos.y, REFEREE_LERP);
+      }
+    }
+  }
+
+  /**
+   * Sistema de resolução física — camada separada e independente da tática.
+   * Trata todas as entidades (jogadores + árbitro) como corpos sólidos com raio.
+   * Resolve sobreposições iterativamente até convergência.
+   */
+  private resolvePhysics(holderId: string | null) {
+    // Raios corporais por tipo de entidade
+    const BODY_RADIUS = {
+      GOL: 2.0,
+      FIELD: 2.5,   // jogadores de linha
+      REFEREE: 2.0,
+    };
+
+    // Distância mínima entre dois corpos = soma dos raios + margem de segurança
+    const SAFETY_MARGIN = 1.5;
+
+    // Coleta todas as entidades em uma lista unificada para resolução par-a-par
+    interface PhysicsBody {
+      x: number;
+      y: number;
+      radius: number;
+      isKeeper: boolean;
+      isReferee: boolean;
+      playerId: string;
+    }
+
+    const bodies: PhysicsBody[] = this.players.map(p => ({
+      x: p.current.x,
+      y: p.current.y,
+      radius: p.position === 'GOL' ? BODY_RADIUS.GOL : BODY_RADIUS.FIELD,
+      isKeeper: p.position === 'GOL',
+      isReferee: false,
+      playerId: p.playerId,
+    }));
+
+    // Adiciona o árbitro como entidade física
+    bodies.push({
+      x: this.refereePos.x,
+      y: this.refereePos.y,
+      radius: BODY_RADIUS.REFEREE,
+      isKeeper: false,
+      isReferee: true,
+      playerId: '__referee__',
+    });
+
+    // Iterações de resolução — convergência garantida com 5 passos
+    const ITERATIONS = 5;
+    for (let iter = 0; iter < ITERATIONS; iter++) {
+      for (let i = 0; i < bodies.length; i++) {
+        for (let j = i + 1; j < bodies.length; j++) {
+          const a = bodies[i];
+          const b = bodies[j];
+          const minDist = a.radius + b.radius + SAFETY_MARGIN;
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 0 && dist < minDist) {
+            const overlap = minDist - dist;
+            const nx = dx / dist;
+            const ny = dy / dist;
+
+            // Goleiro é âncora — não é deslocado, apenas o outro corpo se afasta
+            if (a.isKeeper && b.isKeeper) continue;
+            if (a.isKeeper) {
+              b.x = I.clamp(b.x - nx * overlap, 1, 99);
+              b.y = I.clamp(b.y - ny * overlap, 1, 99);
+            } else if (b.isKeeper) {
+              a.x = I.clamp(a.x + nx * overlap, 1, 99);
+              a.y = I.clamp(a.y + ny * overlap, 1, 99);
+            } else {
+              // Divisão simétrica — cada corpo se afasta metade da sobreposição
+              const half = overlap * 0.5;
+              a.x = I.clamp(a.x + nx * half, 1, 99);
+              a.y = I.clamp(a.y + ny * half, 1, 99);
+              b.x = I.clamp(b.x - nx * half, 1, 99);
+              b.y = I.clamp(b.y - ny * half, 1, 99);
+            }
+          }
         }
       }
+    }
 
-      const maxSpeed = SIMULATION_CONFIG.ROLE_SPEED[p.position];
-      const maxForce = maxSpeed * 3.5;
+    // Escreve posições resolvidas de volta aos jogadores
+    for (let i = 0; i < this.players.length; i++) {
+      this.players[i].current.x = bodies[i].x;
+      this.players[i].current.y = bodies[i].y;
+    }
 
-      const result = I.integrateSteering(p.current, p.simVelocity, target, dt, maxSpeed, maxForce);
+    // Escreve posição resolvida do árbitro
+    const refBody = bodies[bodies.length - 1];
+    this.refereePos.x = refBody.x;
+    this.refereePos.y = refBody.y;
 
-      p.previous = p.current;
-      p.current = result.position;
-      p.simVelocity = result.velocity;
+    // === LIMITE RÍGIDO DE JOGADORES PRÓXIMOS À BOLA ===
+    // Máximo 3 jogadores por time dentro de 8 unidades da bola.
+    // Excedentes são empurrados para fora progressivamente.
+    const BALL_ZONE_RADIUS = 8.0;
+    const MAX_PER_TEAM_NEAR_BALL = 3;
+    const PUSH_FORCE = 3.0;
 
-      const speed = I.magnitude(p.simVelocity);
-      let newAngle = p.currentAngle;
-      if (speed > 1) {
-        newAngle = Math.atan2(p.simVelocity.y, p.simVelocity.x);
+    const ball = this.ball.current;
+    const homeNear: { idx: number; dist: number }[] = [];
+    const awayNear: { idx: number; dist: number }[] = [];
+
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      if (p.position === 'GOL') continue;
+      if (p.playerId === holderId) continue; // titular da bola sempre pode ficar
+      const d = Math.hypot(p.current.x - ball.x, p.current.y - ball.y);
+      if (d < BALL_ZONE_RADIUS) {
+        if (i < this.homeCount) homeNear.push({ idx: i, dist: d });
+        else awayNear.push({ idx: i, dist: d });
       }
-      p.previousAngle = p.currentAngle;
-      p.currentAngle = newAngle;
+    }
+
+    // Ordena por distância — os mais próximos ficam, os mais distantes são empurrados
+    homeNear.sort((a, b) => a.dist - b.dist);
+    awayNear.sort((a, b) => a.dist - b.dist);
+
+    const pushExcess = (list: { idx: number; dist: number }[], maxAllowed: number) => {
+      for (let k = maxAllowed; k < list.length; k++) {
+        const p = this.players[list[k].idx];
+        const dx = p.current.x - ball.x;
+        const dy = p.current.y - ball.y;
+        const d = Math.hypot(dx, dy);
+        if (d > 0) {
+          const nx = dx / d;
+          const ny = dy / d;
+          // Empurrão progressivo — quanto mais excedentes, mais forte
+          const excess = list.length - maxAllowed;
+          const force = PUSH_FORCE * (1 + excess * 0.5);
+          p.current.x = I.clamp(p.current.x + nx * force, 1, 99);
+          p.current.y = I.clamp(p.current.y + ny * force, 1, 99);
+        }
+      }
+    };
+
+    pushExcess(homeNear, MAX_PER_TEAM_NEAR_BALL);
+    pushExcess(awayNear, MAX_PER_TEAM_NEAR_BALL);
+
+    // Re-executa resolução física rápida (2 iterações) após o empurrão da zona da bola
+    for (let iter = 0; iter < 2; iter++) {
+      for (let i = 0; i < this.players.length; i++) {
+        if (this.players[i].position === 'GOL') continue;
+        for (let j = i + 1; j < this.players.length; j++) {
+          if (this.players[j].position === 'GOL') continue;
+          const a = this.players[i];
+          const b = this.players[j];
+          const minDist = BODY_RADIUS.FIELD * 2 + SAFETY_MARGIN;
+          const dx = a.current.x - b.current.x;
+          const dy = a.current.y - b.current.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 0 && dist < minDist) {
+            const overlap = minDist - dist;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            const half = overlap * 0.5;
+            a.current.x = I.clamp(a.current.x + nx * half, 1, 99);
+            a.current.y = I.clamp(a.current.y + ny * half, 1, 99);
+            b.current.x = I.clamp(b.current.x - nx * half, 1, 99);
+            b.current.y = I.clamp(b.current.y - ny * half, 1, 99);
+          }
+        }
+      }
+    }
+
+    // Afastamento suave da bola para não-titulares
+    const BALL_CLEAR_DIST = 3.0;
+    const BALL_CLEAR_PUSH = 0.6;
+    for (const p of this.players) {
+      if (p.playerId === holderId || p.position === 'GOL') continue;
+      const dx = p.current.x - this.ball.current.x;
+      const dy = p.current.y - this.ball.current.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0 && dist < BALL_CLEAR_DIST) {
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const force = (BALL_CLEAR_DIST - dist) * BALL_CLEAR_PUSH;
+        p.current.x = I.clamp(p.current.x + nx * force, 1, 99);
+        p.current.y = I.clamp(p.current.y + ny * force, 1, 99);
+      }
     }
   }
 }
